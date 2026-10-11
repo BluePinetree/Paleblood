@@ -4,6 +4,11 @@ This page records contracts used to implement small runtime calls in issues [#34
 
 ## Evidence in this repository
 
+The runtime registry distinguishes behavior it implements from diagnostics for behavior that is
+still unknown. `RT_SYSLIB` entries are callable implementations and count toward coverage;
+`RT_SYSLIB_UNRESOLVED` entries remain callable so a reached import can fail with a useful name,
+but do not count as implemented or as supplied imports in progress reports.
+
 `symbols/imports.csv` records `getpagesize` and `gettimeofday` as imports of `eboot` from `libScePosix`; `libc.elf` imports `clock_gettime`, `getpagesize`, `getpid`, and `gettimeofday` from `libkernel`. Import rows establish that the names are required, not their arguments, return values at every call site, or all clock IDs.
 
 The decompiled frame limiter calls `gettimeofday` with a null timezone argument. A separate [verified clock helper](../game/frame_timing/monotonic_clock.cpp) calls `sceKernelClockGettime` with clock ID `4`, named `CLOCK_MONOTONIC` in that code. This confirms one monotonic clock request in the game; it does not establish every ID passed through the imported `clock_gettime` wrapper, or that no other ID is used in unexamined code.

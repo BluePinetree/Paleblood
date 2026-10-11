@@ -33,6 +33,14 @@ static void *fn(const char *library, const char *symbol)
     return NULL;
 }
 
+static int is_implemented(const char *library, const char *symbol)
+{
+    for (const rt_syslib_entry *e = rt_syslib_begin(); e && e != rt_syslib_end(); e++)
+        if (!strcmp(e->library, library) && !strcmp(e->symbol, symbol))
+            return e->capability == RT_SYSLIB_CAPABILITY_IMPLEMENTED;
+    return 0;
+}
+
 typedef int (*f1)(void **);
 typedef int (*f2i)(void **, int);
 typedef int (*f_state)(int *);
@@ -95,6 +103,7 @@ int main(void)
 {
     /* Unresolved entries are still callable diagnostics, but are not reported as implemented. */
     CHECK(((int (*)(void))fn("test", "testUnresolvedEntry"))() == -1);
+    CHECK(!is_implemented("test", "testUnresolvedEntry"));
 
     const finit init = (finit)fn("libkernel", "scePthreadMutexInit");
     const f1 lock = (f1)fn("libkernel", "scePthreadMutexLock"), trylock = (f1)fn("libkernel", "scePthreadMutexTrylock");
@@ -159,6 +168,12 @@ int main(void)
     netctl_unregister_entry = fn("libSceNetCtl", "sceNetCtlUnregisterCallback");
     netctl_get_info_entry = fn("libSceNetCtl", "sceNetCtlGetInfo");
     netctl_get_nat_info_entry = fn("libSceNetCtl", "sceNetCtlGetNatInfo");
+    CHECK(is_implemented("libSceNetCtl", "sceNetCtlGetState"));
+    CHECK(is_implemented("libSceNetCtl", "sceNetCtlCheckCallback"));
+    CHECK(is_implemented("libSceNetCtl", "sceNetCtlRegisterCallback"));
+    CHECK(is_implemented("libSceNetCtl", "sceNetCtlUnregisterCallback"));
+    CHECK(!is_implemented("libSceNetCtl", "sceNetCtlGetInfo"));
+    CHECK(!is_implemented("libSceNetCtl", "sceNetCtlGetNatInfo"));
     if (failures) return 1;
     netctl_shared = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     if (netctl_shared == MAP_FAILED) { perror("mmap"); return 1; }

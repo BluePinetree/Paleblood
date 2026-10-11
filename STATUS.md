@@ -15,7 +15,8 @@ Each row includes the next: verified functions are also edge-verified and replac
 
 | Runtime | |
 |---|---|
-| System imports provided | 238 of 686 (34.69%): 219 by the game's own modules, 19 by the runtime; 448 remaining |
+| System imports implemented | 246 of 686 (35.86%): 219 by the game's own modules, 27 by the runtime |
+| Other imports | 2 registered fail-loud diagnostics, 438 unbound |
 | Furthest boot milestone | loaded (0 of 8) |
 | Boot stops at | `scePthreadAttrGetaffinity` (libkernel, called by libc.elf) |
 
