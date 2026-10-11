@@ -18,16 +18,16 @@ One page per game system: summary, key functions, structs and globals, patch poi
 
 ## Progress
 
-| | Functions | Bytes |
+| | Functions (of target) | Bytes (of target) |
 |---|---:|---:|
 | Target (Ghidra export) | 157,757 | 42,487,347 |
 | Replaced | 30 (0.02%) | 15,176 (0.04%) |
-| Edge-verified | 30 (0.02%) | 15,176 (0.04%) |
+| Edge-verified (includes verified) | 30 (0.02%) | 15,176 (0.04%) |
 | Verified | 21 (0.01%) | 14,010 (0.03%) |
 
-Each row includes the next: verified functions are also edge-verified and replaced.
+Counts are cumulative: verified functions are included in edge-verified and replaced totals.
 
-| System | Tracked | Replaced | Edge-verified | Verified | Replaced bytes |
+| System | Tracked | Replaced | Edge-verified (includes verified) | Verified | Replaced bytes |
 |---|---:|---:|---:|---:|---:|
 | ai | 1 | 1 | 1 | 1 | 2,693 |
 | audio | 0 | 0 | 0 | 0 | 0 |

@@ -19,6 +19,10 @@ these updates. It:
 
 In the recordings from Iosefka's Clinic the name string is never built.
 
+The source calls this value **points**. Its relationship to stamina, and whether this update
+belongs only to the player, are not established. The current evidence-backed account is in
+Stats & Progression.
+
 Scope still to map: the character instance layout, the modules (`+0x3b0`), the parameters,
 the other per-frame updates.
 
