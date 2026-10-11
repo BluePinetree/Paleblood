@@ -133,7 +133,8 @@ A function goes to `main` only when it is **verified and readable**:
   `tools/validate_functions.py` checks it in CI.
 
 Investigation notes and logs go in the pull request, not in the repository. Game screenshots and
-clips do not belong in the Paleblood code repository or its pull requests (see Rules).
+clips do not belong in the Paleblood code repository, issues, pull requests, or Discussions (see
+Rules).
 
 ## Your own copy (decompilation work)
 
