@@ -52,6 +52,26 @@ typedef int (*f_nat)(void *);
 typedef int (*finit)(void **, void **, const char *);
 typedef uint32_t (*f_u32_u32)(uint32_t);
 typedef uint16_t (*f_u16_u16)(uint16_t);
+typedef int (*f_inet_pton)(int, const char *, void *);
+
+static void *net_inet_pton_entry;
+static int net_pton_unknown_family(void)
+{
+    unsigned char address[4];
+    return ((f_inet_pton)net_inet_pton_entry)(0x7f, "192.0.2.1", address);
+}
+static int net_pton_null_source(void)
+{
+    unsigned char address[4];
+    return ((f_inet_pton)net_inet_pton_entry)(2, NULL, address);
+}
+static int net_pton_null_destination(void)
+{
+    return ((f_inet_pton)net_inet_pton_entry)(2, "192.0.2.1", NULL);
+}
+static void net_pton_unknown_family_call(void) { (void)net_pton_unknown_family(); }
+static void net_pton_null_source_call(void) { (void)net_pton_null_source(); }
+static void net_pton_null_destination_call(void) { (void)net_pton_null_destination(); }
 
 /* libSceNetCtl, the offline group (issue #41). rt_fatal aborts the process (runtime/process.c), so a
    fatal path can only be proved in a child: fork, call the entry the way the guest does, and check
@@ -115,6 +135,7 @@ int main(void)
     const f_u16_u16 htons = (f_u16_u16)fn("libSceNet", "sceNetHtons");
     const f_u32_u32 ntohl = (f_u32_u32)fn("libSceNet", "sceNetNtohl");
     const f_u16_u16 ntohs = (f_u16_u16)fn("libSceNet", "sceNetNtohs");
+    net_inet_pton_entry = fn("libSceNet", "sceNetInetPton");
     if (failures) return 1;
 
     /* default (error-checking): relocking is EDEADLK (FreeBSD 11), as an SCE code */
@@ -160,6 +181,23 @@ int main(void)
     CHECK(htons(UINT16_MAX) == UINT16_MAX && ntohs(UINT16_MAX) == UINT16_MAX);
     CHECK(ntohl(htonl(UINT32_C(0x01020304))) == UINT32_C(0x01020304));
     CHECK(ntohs(htons(UINT16_C(0x0102))) == UINT16_C(0x0102));
+
+    /* The executable's observed use is AF_INET. Output is four network-order bytes; malformed
+       text returns zero. Other address families and null-pointer behavior remain fail-loud. */
+    unsigned char address[4] = {0};
+    const f_inet_pton inet_pton_call = (f_inet_pton)net_inet_pton_entry;
+    CHECK(is_implemented("libSceNet", "sceNetInetPton"));
+    CHECK(inet_pton_call(2, "192.0.2.1", address) == 1);
+    CHECK(address[0] == 192 && address[1] == 0 && address[2] == 2 && address[3] == 1);
+    CHECK(inet_pton_call(2, "0.0.0.0", address) == 1);
+    CHECK(address[0] == 0 && address[1] == 0 && address[2] == 0 && address[3] == 0);
+    CHECK(inet_pton_call(2, "255.255.255.255", address) == 1);
+    CHECK(address[0] == 255 && address[1] == 255 && address[2] == 255 && address[3] == 255);
+    CHECK(inet_pton_call(2, "192.0.2.256", address) == 0);
+    CHECK(inet_pton_call(2, "192.0.2", address) == 0);
+    CHECK(died_in_fatal(net_pton_unknown_family_call));
+    CHECK(died_in_fatal(net_pton_null_source_call));
+    CHECK(died_in_fatal(net_pton_null_destination_call));
 
     /* libSceNetCtl: the offline answers (issue #41). */
     netctl_get_state_entry = fn("libSceNetCtl", "sceNetCtlGetState");

@@ -158,7 +158,7 @@ eboot,libSceNet,sceNetGetsockopt,function,
 eboot,libSceNet,sceNetHtonl,function,runtime
 eboot,libSceNet,sceNetHtons,function,runtime
 eboot,libSceNet,sceNetInetNtop,function,
-eboot,libSceNet,sceNetInetPton,function,
+eboot,libSceNet,sceNetInetPton,function,runtime
 eboot,libSceNet,sceNetInit,function,
 eboot,libSceNet,sceNetListen,function,
 eboot,libSceNet,sceNetNtohl,function,runtime
