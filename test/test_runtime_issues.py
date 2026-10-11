@@ -20,6 +20,8 @@ class RuntimeIssueStatusTests(unittest.TestCase):
                     RT_SYSLIB("libSceNet", sceNetHtons, net_htons);
                     RT_SYSLIB("libSceNet", sceNetNtohl, net_ntohl);
                     RT_SYSLIB("libSceNet", sceNetNtohs, net_ntohs);
+                    RT_SYSLIB_UNRESOLVED("libSceNetCtl", sceNetCtlGetInfo, netctl_get_info);
+                    RT_SYSLIB_UNRESOLVED("libSceNetCtl", sceNetCtlGetNatInfo, netctl_get_nat_info);
                 ''')
 
             self.assertEqual({
@@ -29,19 +31,24 @@ class RuntimeIssueStatusTests(unittest.TestCase):
                 ('libSceNet', 'sceNetNtohs'),
             }, runtime_issues.read_runtime_entries(root))
 
+            self.assertNotIn(('libSceNetCtl', 'sceNetCtlGetInfo'), runtime_issues.read_runtime_entries(root))
+            self.assertNotIn(('libSceNetCtl', 'sceNetCtlGetNatInfo'), runtime_issues.read_runtime_entries(root))
+
     def test_issue_counts_and_marks_registered_symbols(self):
-        symbols = ('sceNetHtonl', 'sceNetHtons', 'sceNetNtohl', 'sceNetNtohs', 'sceNetSocket')
+        symbols = ('sceNetHtonl', 'sceNetHtons', 'sceNetNtohl', 'sceNetNtohs',
+                   'sceNetCtlGetInfo', 'sceNetCtlGetNatInfo', 'sceNetSocket')
         rows = [{'library': 'libSceNet', 'symbol': symbol, 'implemented': 'no',
                  'kind': 'function', 'importers': {'eboot'}} for symbol in symbols]
         entries = {('libSceNet', symbol) for symbol in symbols[:4]}
 
         body = runtime_issues.issue(runtime_issues.GROUPS[-1], rows, entries)['body']
 
-        self.assertIn('4 of 5 imported functions implemented', body)
-        self.assertIn('### libSceNet (4 of 5)', body)
+        self.assertIn('4 of 7 imported functions implemented', body)
+        self.assertIn('### libSceNet (4 of 7)', body)
         for symbol in symbols[:4]:
             self.assertIn(f'- [x] `{symbol}`', body)
-        self.assertIn('- [ ] `sceNetSocket`', body)
+        for symbol in symbols[4:]:
+            self.assertIn(f'- [ ] `{symbol}`', body)
 
 
 if __name__ == '__main__':

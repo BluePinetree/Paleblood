@@ -8,6 +8,9 @@
 #include <stdio.h>
 #include <string.h>
 
+static int unresolved_test_entry(void) { return -1; }
+RT_SYSLIB_UNRESOLVED("test", testUnresolvedEntry, unresolved_test_entry);
+
 static int failures;
 #define CHECK(cond)                                                                                \
     do {                                                                                           \
@@ -34,6 +37,9 @@ typedef uint16_t (*f_u16_u16)(uint16_t);
 
 int main(void)
 {
+    /* Unresolved entries are still callable diagnostics, but are not reported as implemented. */
+    CHECK(((int (*)(void))fn("test", "testUnresolvedEntry"))() == -1);
+
     const finit init = (finit)fn("libkernel", "scePthreadMutexInit");
     const f1 lock = (f1)fn("libkernel", "scePthreadMutexLock"), trylock = (f1)fn("libkernel", "scePthreadMutexTrylock");
     const f1 unlock = (f1)fn("libkernel", "scePthreadMutexUnlock"), destroy = (f1)fn("libkernel", "scePthreadMutexDestroy");
