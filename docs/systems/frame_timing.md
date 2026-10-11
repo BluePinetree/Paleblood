@@ -31,6 +31,10 @@ confirmed call passes a null timezone pointer. The game's separate verified cloc
 `sceKernelClockGettime` with ID `4`, identified as `CLOCK_MONOTONIC`; that does not establish the
 IDs accepted by the imported libc `clock_gettime` wrapper. See the runtime system-call notes.
 
+The frame step also passes time into character updates. One verified update accumulates a
+per-frame points value using that time and retains fractional progress between frames. Its
+evidence and unresolved stat identity are documented in Stats & Progression.
+
 `0x004632d0` is a small `gettimeofday` helper in microseconds that the stock game never calls:
 nothing calls it directly, and no relocated pointer (vtable or table slot) points at it. The
 frame-rate patches overwrite it and its neighbours with their own code (a code cave), so it is

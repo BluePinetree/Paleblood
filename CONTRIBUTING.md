@@ -132,8 +132,9 @@ A function goes to `main` only when it is **verified and readable**:
   reason it can't be used (docs/VERIFY.md, "Recorded results and quarantine").
   `tools/validate_functions.py` checks it in CI.
 
-Investigation notes and logs go in the pull request, not in the repository. No screenshots or
-clips of the game there either (see Rules).
+Investigation notes and logs go in the pull request, not in the repository. Game screenshots and
+clips do not belong in the Paleblood code repository, issues, pull requests, or Discussions (see
+Rules).
 
 ## Your own copy (decompilation work)
 
@@ -153,11 +154,15 @@ firmware, keys or decryption tools.
 - **Never commit** game binaries (ELF, SELF, PRX, PKG), assets, extracted data,
   decompiler projects or raw decompiler dumps. The hook and CI reject them. If you are unsure,
   do not commit it.
-- **No screenshots, clips or images of the game**, anywhere in this repository or other project repositories:
-  not in commits, issues, pull requests or Discussions. The hook and CI refuse image and video
-  files (by extension and by contents). The only images allowed are recordings of our own tools'
-  output (such as a terminal running `tools/verify.py`), under `docs/assets/` and listed in
-  `docs/assets/ALLOWLIST` with the command that produced them (`tools/terminal_gif.py`).
+- **No game screenshots, clips or extracted images in the Paleblood code repository**, its issues,
+  pull requests or Discussions. The hook and CI refuse image and video files (by extension and by
+  contents). The only images allowed here are recordings of our own tools' output (such as a
+  terminal running `tools/verify.py`), under `docs/assets/` and listed in `docs/assets/ALLOWLIST`
+  with the command that produced them (`tools/terminal_gif.py`). This repository rule does not
+  decide whether a contextual image may appear on the public documentation site: each proposed
+  site asset requires its own documented source, rights basis, editorial purpose and maintainer
+  review under that site's media policy. Attribution or educational intent alone does not grant
+  permission.
 - Write source, not a transcription. Readable names and structure; behavior has
   to match, bytes do not.
 - Do not leave `FUN_`, `DAT_`, `undefined8` or `local_` names from the

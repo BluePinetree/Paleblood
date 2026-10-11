@@ -20,6 +20,11 @@ each AI object; the debug display, axis frames, boxes and the manager-wide draw 
 Scope still to map: the AI world step itself (`0x021cdad0`), the groups and objects, the
 behaviour of individual enemies.
 
+This verified wrapper establishes how the AI manager is stepped and how its debug drawing is
+gated. It does not reveal an individual enemy's decisions, attack timing, or boss phases. The
+current source and evidence contain no basis for those profiles yet; gameplay observations alone
+will be labeled as observations until their implementation is traced.
+
 ## Key functions
 
 | Address | Size | Name | Status | Notes |
