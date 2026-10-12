@@ -237,6 +237,8 @@ class Run:
         for entry in case.get('imports', []):
             self.scripts.setdefault(nid(entry['name']), []).append(entry)
         self.buffers: dict[str, tuple[int, int]] = {}
+        self.redzones: list[tuple[int, bytes, str]] = []
+        self.access_trace: list[dict] = []
         self.callbacks = []
         self.native: dict[int, dict] = {}      # import index -> series stub state
         self.keep = []
@@ -283,6 +285,12 @@ class Run:
             self.buffers[name] = (start, size)
             ctypes.memmove(start, data + bytes(size - len(data)), size)
             payload_pages = max(1, (size + PAGE - 1) // PAGE)
+            redzone_start = start + size
+            redzone_end = start + payload_pages * PAGE
+            if redzone_end > redzone_start:
+                redzone = bytes((0xA5 ^ ((i * 29 + len(name)) & 0xff)) for i in range(redzone_end - redzone_start))
+                ctypes.memmove(redzone_start, redzone, len(redzone))
+                self.redzones.append((redzone_start, redzone, name))
             guard = start + payload_pages * PAGE
             if off + (payload_pages + 1) * PAGE > SANDBOX_SIZE:
                 raise BadInput('buffers and guard pages exceed the sandbox')
@@ -317,7 +325,7 @@ class Run:
                 data = struct.pack('<Q', self.guest(hexint(m['guest'])))
             else:
                 data = bytes.fromhex(m['bytes'])
-            self.check_memory(addr, len(data), write=True)
+            self.check_memory(addr, len(data), write=True, source="fixture_setup")
             ctypes.memmove(addr, data, len(data))
 
     def guest(self, ps4: int) -> int:
@@ -338,19 +346,36 @@ class Run:
             return self.guest(int(v[6:], 0))
         return hexint(v) & 0xffffffffffffffff
 
-    def check_memory(self, address: int, size: int, write: bool = False) -> None:
-        """Validate scripted accesses against declared buffers or mapped ELF load segments."""
+    def check_memory(self, address: int, size: int, write: bool = False,
+                     source: str = "scripted_callback") -> None:
+        """Validate an observed harness-mediated access against declared regions.
+
+        This records accesses made by scripted imports/stubs and fixture setup. It does not
+        instrument arbitrary guest load/store instructions; those remain an explicit limitation.
+        """
         if size < 0:
             raise BadInput('negative memory access size')
         for start, length in self.buffers.values():
             if start <= address and address + size <= start + length:
+                if source != "fixture_setup":
+                    self.access_trace.append({"access": "write" if write else "read",
+                                              "address": self.describe(address), "size": size,
+                                              "source": source, "region": self.describe(start)})
                 return
         stack_top = self.block[19]
         if stack_top and stack_top - STACK_WINDOW <= address and address + size <= stack_top:
+            if source != "fixture_setup":
+                self.access_trace.append({"access": "write" if write else "read",
+                                          "address": self.describe(address), "size": size,
+                                          "source": source, "region": "stack"})
             return
         required_flag = 2 if write else 4
         for vaddr, memsz, flags in self.boot['loads']:
             if flags & required_flag and IMAGE + vaddr <= address and address + size <= IMAGE + vaddr + memsz:
+                if source != "fixture_setup":
+                    self.access_trace.append({"access": "write" if write else "read",
+                                              "address": self.describe(address), "size": size,
+                                              "source": source, "region": "guest_image"})
                 return
         direction = 'write' if write else 'read'
         raise BadInput(f'scripted {direction} 0x{address:x}+0x{size:x} is outside declared readable/writable regions')
@@ -410,7 +435,7 @@ class Run:
             if series.get('format') != 'timeval_us' or int(series.get('offset', 0)):
                 raise BadInput(f"unsupported series {series.get('format')} at offset {series.get('offset', 0)}")
             pack = lambda v: struct.pack('<qq', int(v) // 1_000_000, int(v) % 1_000_000)
-            self.check_memory(args[int(series['arg'])], 16, write=True)
+            self.check_memory(args[int(series['arg'])], 16, write=True, source="import_series")
             ctypes.memmove(args[int(series['arg'])], pack(series['values'][i]), 16)
             ret = hexint(entry.get('ret', 0)) & 0xffffffffffffffff
             n = self.native.get(index)
@@ -430,7 +455,7 @@ class Run:
             if 'size' in w and len(data) != int(w['size']):
                 self.errors.append(f"{entry['name']}: write of {len(data)} bytes, the case says {w['size']}")
             address = args[int(w['arg'])] + int(w.get('offset', 0))
-            self.check_memory(address, len(data), write=True)
+            self.check_memory(address, len(data), write=True, source="import_write")
             ctypes.memmove(address, data, len(data))
         return hexint(entry.get('ret', 0)) & 0xffffffffffffffff
 
@@ -449,7 +474,7 @@ class Run:
             record.setdefault('argf32', []).append(ctypes.string_at(save + 16 * int(r), 4).hex())
         for m in entry.get('argmem', []):
             at = args[int(m['arg'])] + int(m.get('offset', 0))
-            self.check_memory(at, int(m['size']))
+            self.check_memory(at, int(m['size']), source="stub_argument")
             record.setdefault('argmem', []).append(ctypes.string_at(at, int(m['size'])).hex())
         self.calls.append(record)
         for w in entry.get('writes', []):
@@ -461,7 +486,7 @@ class Run:
             else:
                 data = bytes.fromhex(w['bytes'])
             address = args[int(w['arg'])] + int(w.get('offset', 0))
-            self.check_memory(address, len(data), write=True)
+            self.check_memory(address, len(data), write=True, source="stub_write")
             ctypes.memmove(address, data, len(data))
         return self.value(entry.get('ret', 0))
 
@@ -501,6 +526,13 @@ class Run:
         for index in self.native:
             self.finish_series(index)
         after = self.snapshot()
+        redzone_writes = []
+        for start, expected, name in self.redzones:
+            actual = ctypes.string_at(start, len(expected))
+            changed = [i for i, (old, new) in enumerate(zip(expected, actual)) if old != new]
+            if changed:
+                redzone_writes.append({"buffer": name, "first_offset": self.buffers[name][1] + changed[0],
+                                       "changed_bytes": len(changed)})
         out: dict = {'id': self.case.get('id', 'case')}
         returns = self.case.get('returns', 'i64')
         rax, rdx = self.block[7], self.block[8]
@@ -543,6 +575,11 @@ class Run:
                 writes.append({'addr': self.describe(start + i), 'bytes': new[i:j].hex()})
                 i = j
         out['writes'] = writes
+        out['access_trace'] = self.access_trace
+        out['access_trace_scope'] = "harness-mediated scripted accesses; guest instructions are not instrumented"
+        out['redzone_writes'] = redzone_writes
+        if redzone_writes:
+            out.setdefault('errors', []).append('buffer redzone modified: ' + json.dumps(redzone_writes, sort_keys=True))
         out['calls'] = self.calls
         if self.errors:
             out['errors'] = self.errors

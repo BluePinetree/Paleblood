@@ -32,7 +32,7 @@ import verify  # noqa: E402
 import verification  # noqa: E402
 
 SCHEMA = 1
-ENGINE_VERSION = "1.0.0"
+ENGINE_VERSION = "1.1.0"
 ABI_REQUIRED_FIELDS = {"calling_convention", "confidence", "evidence", "stack_alignment",
                        "arguments", "returns", "input_regions", "writable_regions", "execution_limits"}
 
@@ -548,7 +548,11 @@ def minimize_fixture(case: dict, evaluate, max_attempts: int = 64) -> tuple[dict
 
 
 def explore_fixtures(fixtures: list[tuple[Path, dict]], abi: dict, limit: int, seed: int) -> list[dict]:
-    """Generate a bounded deterministic set from explicitly typed ABI arguments only."""
+    """Generate bounded typed-value, explicit-alias, and floating-point variants.
+
+    Pointer aliasing is generated only when both ABI arguments explicitly opt in with
+    ``alias_safe: true``. This avoids inventing valid alias behavior for unknown contracts.
+    """
     if limit < 1 or limit > 10000:
         raise DifferentialError("fixture limit must be between 1 and 10000")
     generated = []
@@ -567,6 +571,17 @@ def explore_fixtures(fixtures: list[tuple[Path, dict]], abi: dict, limit: int, s
                     current = base["args"][register]
                     if isinstance(current, str) and current.startswith("buf:"):
                         choices = [current + "+0x1"]
+            elif value_type in ("float", "double"):
+                import struct
+                if value_type == "float":
+                    packed = [struct.pack("<f", value) for value in
+                              (0.0, -0.0, 1.0, -1.0, 2.0 ** -149, 3.4028234663852886e38,
+                               float("inf"), float("-inf"), float("nan"))]
+                else:
+                    packed = [struct.pack("<d", value) for value in
+                              (0.0, -0.0, 1.0, -1.0, 2.0 ** -1074, 1.7976931348623157e308,
+                               float("inf"), float("-inf"), float("nan"))]
+                choices = [value.hex().ljust(32, "0") for value in packed]
             else:
                 import re
                 match = re.fullmatch(r"(?:u?int|u?)(8|16|32|64)_t", value_type)
@@ -584,6 +599,24 @@ def explore_fixtures(fixtures: list[tuple[Path, dict]], abi: dict, limit: int, s
                 variant["args"][register] = value
                 variant["exploration"] = {"seed": seed, "source_fixture": path.stem,
                                            "register": register, "value": value}
+                generated.append(variant)
+        pointer_args = [item for item in abi.get("arguments", [])
+                        if item.get("type", "").endswith("*") and item.get("alias_safe") is True
+                        and item.get("register") in base.get("args", {})]
+        for left_index, left in enumerate(pointer_args):
+            left_value = base["args"][left["register"]]
+            if not isinstance(left_value, str) or not left_value.startswith("buf:"):
+                continue
+            for right in pointer_args[left_index + 1:]:
+                right_value = base["args"][right["register"]]
+                if not isinstance(right_value, str) or not right_value.startswith("buf:"):
+                    continue
+                variant = json.loads(canonical(base))
+                variant["id"] = f"{base.get('id', path.stem)}_explore_alias_{left['register']}_{right['register']}"
+                variant["args"][right["register"]] = left_value
+                variant["exploration"] = {"seed": seed, "source_fixture": path.stem,
+                                           "alias": [left["register"], right["register"]],
+                                           "value": left_value}
                 generated.append(variant)
     # Seed affects reproducible ordering when a caller imposes a smaller budget.
     random.Random(seed).shuffle(generated)
@@ -657,14 +690,16 @@ def write_bundle(destination: Path, stored: dict, run_id: str) -> None:
               "tool_versions": {"python": platform.python_version(), "engine": ENGINE_VERSION,
                                 "platform": platform.system() + " " + platform.machine()},
               "compilers": compiler_identity(identity.get("build_configuration")),
-              "coverage": {"available": False, "reason": "existing harness does not emit control-flow coverage"},
+              "coverage": {"available": False, "reason": "harness does not emit instruction or CFG coverage"},
+              "memory_access_trace": {"available": "scripted_only",
+                                      "reason": "harness-mediated import/stub accesses are recorded; guest loads/stores are not instrumented"},
               "memory_reads": {"available": False,
-                               "reason": "existing harness records fixture inputs and final writes, not dynamic read events"},
+                               "reason": "arbitrary guest memory reads are not dynamically traced"},
               "first_divergence": {"available": False,
                                    "reason": "harness compares final observations; it does not trace instruction-by-instruction state"},
-              "limitations": ["No dynamic memory-read trace or per-access bounds are provided by the current harness.",
+              "limitations": ["Redzones detect changed guest writes into buffer padding, but not reads, same-value writes, or the exact access instruction.",
                              "No instruction-level first-divergence trace or control-flow coverage is emitted.",
-                             "Exploration does not systematically generate pointer-alias or floating-point edge cases.",
+                             "Alias cases require explicit alias_safe ABI evidence; exploration does not use coverage feedback.",
                              "A differential result is not a verified-function promotion or proof of real-game behavior.",
                              "Gameplay fixture definitions are private machine data; keep this bundle outside public repositories and do not upload it."]}
     destination.mkdir(parents=True, exist_ok=True)
@@ -805,7 +840,7 @@ def main() -> int:
                              (json.dumps(case, indent=2, sort_keys=True) + "\n").encode())
             payload = {"address": catalog.address(args.address), "seed": args.seed,
                        "generated": len(generated), "output": str(args.out),
-                       "coverage_note": "bounded ABI-guided values; no dynamic coverage feedback"}
+                       "coverage_note": "bounded typed-value, explicitly safe alias, and float-edge generation; no dynamic coverage feedback"}
         elif args.command == "original":
             elf_sha = executable_identity(args.elf)
             fixtures, abi = load_fixtures(args.cases, args.address)
@@ -879,7 +914,8 @@ def main() -> int:
                                       original_status="failed" if failed_original else "passed",
                                       differential_status="failed" if comparison["failed"] else "passed",
                                       mismatch_status="mismatch" if comparison["failed"] else "none",
-                                      blockers=["dynamic memory reads not traced", "instruction coverage unavailable"],
+                                      blockers=["guest memory reads and instruction-level writes not traced",
+                                                "first-divergence and CFG coverage unavailable"],
                                       evidence_ref=run_id)
             payload = {"run_id": run_id, **result}
         elif args.command == "minimize":

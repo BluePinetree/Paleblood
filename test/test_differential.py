@@ -68,6 +68,25 @@ class Differential(unittest.TestCase):
             values = {item["args"]["rdi"] for item in first}
             self.assertTrue(values <= {"0x0", "0x1", "0xffffffff", "0x2"})
 
+    def test_exploration_generates_opted_in_alias_and_float_edges(self):
+        abi = {**ABI, "arguments": [
+            {"register": "rdi", "type": "uint8_t *", "direction": "inout", "alias_safe": True},
+            {"register": "rsi", "type": "uint8_t *", "direction": "inout", "alias_safe": True},
+            {"register": "xmm0", "type": "float", "direction": "input"},
+        ]}
+        case = self.case()
+        case["args"] = {"rdi": "buf:left", "rsi": "buf:right", "xmm0": "00000000000000000000000000000000"}
+        case["buffers"] = {"left": {"size": 4}, "right": {"size": 4}}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "base.json"
+            path.write_text(json.dumps(case))
+            generated = differential.explore_fixtures([(path, case)], abi, 100, 19)
+        alias = next(row for row in generated if "alias" in row.get("exploration", {}))
+        self.assertEqual(alias["args"]["rsi"], "buf:left")
+        float_values = {row["args"]["xmm0"] for row in generated if row.get("exploration", {}).get("register") == "xmm0"}
+        self.assertGreaterEqual(len(float_values), 8)
+        self.assertIn("00000080000000000000000000000000", float_values)  # negative zero
+
     def test_minimizer_preserves_mismatch_class_and_is_bounded(self):
         case = self.case()
         case["memory"] = [{"addr": "0x00401000", "bytes": "01020304"}]
@@ -156,6 +175,16 @@ class Differential(unittest.TestCase):
             result = verify.compare({"schema": 1, "address": "0x1000", "cases": [original]},
                                     {"schema": 1, "address": "0x1000", "cases": [replacement]})
             self.assertEqual(result["failed"], 1)
+
+    def test_comparator_reports_first_mediated_memory_access_difference(self):
+        original = {"schema": 1, "address": "0x1000", "cases": [{"id": "x", "ret": {},
+                    "preserved": {}, "writes": [], "calls": [],
+                    "access_trace": [{"access": "read", "address": "buf:a", "size": 4}]}]}
+        replacement = json.loads(json.dumps(original))
+        replacement["cases"][0]["access_trace"][0]["access"] = "write"
+        result = verify.compare(original, replacement)
+        self.assertEqual(result["failed"], 1)
+        self.assertIn("first difference at event 0", result["failures"][0]["diffs"][-1])
 
     def test_evidence_bundle_is_portable_and_outside_repository(self):
         with tempfile.TemporaryDirectory() as tmp:

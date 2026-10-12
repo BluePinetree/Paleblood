@@ -68,6 +68,9 @@ def boot_image():
     code[0x910:0x912] = bytes.fromhex('ebfe')
     code[0x920:0x928] = bytes.fromhex('48c7c707000000c3')
     code[0x930:0x936] = bytes.fromhex('ba09000000c3')
+    # Deliberately writes one byte beyond an eight-byte declared buffer. The payload remains
+    # mapped, so the deterministic redzone check must report the exact overflow offset.
+    code[0x940:0x945] = bytes.fromhex('c6470801c3')
     return ps4elf.build(
         segments=[(0, bytes(code), 0x1000, 5), (0x1000, DATA, 0x20, 6)],
         symbols=[(nid('testImport') + '#A#A', ps4elf.STT_FUNC, None)],
@@ -84,7 +87,8 @@ CASE = {
 }
 
 
-@unittest.skipUnless(sys.platform == 'linux' and shutil.which('cc'), 'needs Linux x86-64 and a C compiler')
+@unittest.skipUnless(sys.platform == 'linux' and shutil.which(os.environ.get('CC', 'cc')),
+                     'needs Linux x86-64 and a C compiler')
 class Harness(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp()
@@ -120,7 +124,7 @@ class Harness(unittest.TestCase):
                                     else '*(uint32_t *)(img + 0x1018) = (uint32_t)local;')
             f.write(source)
         lib = os.path.join(self.d, f'r{int(broken)}-{mutation or "plain"}.so')
-        subprocess.run(['cc', '-shared', '-fPIC', '-O2', '-o', lib, src], check=True)
+        subprocess.run([os.environ.get('CC', 'cc'), '-shared', '-fPIC', '-O2', '-o', lib, src], check=True)
         return lib
 
     def test_original_runs(self):
@@ -129,6 +133,20 @@ class Harness(unittest.TestCase):
         self.assertIn({'addr': 'buf:out+0x0', 'bytes': '3413'}, r['writes'])
         self.assertIn({'addr': '0x00401018', 'bytes': '3413'}, r['writes'])
         self.assertTrue(all(v == 'kept' for v in r['preserved'].values()))
+        self.assertTrue(any(event['access'] == 'write' and event['source'] == 'import_write'
+                            for event in r['access_trace']))
+        self.assertIn('not instrumented', r['access_trace_scope'])
+
+    def test_byte_precise_redzone_reports_guest_buffer_overrun(self):
+        case = {'schema': 1, 'address': '0x00400940', 'id': 'redzone', 'returns': 'void',
+                'args': {'rdi': 'buf:out'}, 'buffers': {'out': {'size': 8}},
+                'memory': [], 'imports': [], 'stubs': []}
+        path = os.path.join(self.d, 'redzone.json')
+        with open(path, 'w') as stream:
+            json.dump(case, stream)
+        result = self.side_case(path, address='0x00400940')
+        self.assertEqual(result['redzone_writes'], [{'buffer': 'out', 'first_offset': 8, 'changed_bytes': 1}])
+        self.assertTrue(any('redzone modified' in error for error in result['errors']))
 
     def compare(self, broken):
         res = lambda r: {'schema': 1, 'address': '0x00400000', 'cases': [r]}
@@ -175,7 +193,7 @@ class Harness(unittest.TestCase):
                          'int (*install_hook)(uint64_t,uint64_t,const void *); } host_t;\n'
                          'int bbgame_init(const host_t *h) { (void)h; return 0; }\n'
                          'int replacement(void) { return 8; }\n')
-        subprocess.run(['cc', '-shared', '-fPIC', '-O2', '-o', library, source], check=True)
+        subprocess.run([os.environ.get('CC', 'cc'), '-shared', '-fPIC', '-O2', '-o', library, source], check=True)
         original = verify.run_side(self.boot, case_path, '0x00400900', None, None)
         replacement = verify.run_side(self.boot, case_path, '0x00400900', 'replacement', library)
         summary = verify.compare(

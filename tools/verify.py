@@ -107,6 +107,18 @@ def compare_case(orig: dict, repl: dict) -> list[str]:
         diffs.append(f'memory: {len(bad) - MAX_REPORTED} more differing bytes')
     if orig.get('calls', []) != repl.get('calls', []):
         diffs.append('calls: external call sequence or arguments differ')
+    original_accesses = orig.get('access_trace', [])
+    replacement_accesses = repl.get('access_trace', [])
+    if original_accesses != replacement_accesses:
+        index = next((i for i, pair in enumerate(zip(original_accesses, replacement_accesses))
+                      if pair[0] != pair[1]), min(len(original_accesses), len(replacement_accesses)))
+        original_event = original_accesses[index] if index < len(original_accesses) else '<no event>'
+        replacement_event = replacement_accesses[index] if index < len(replacement_accesses) else '<no event>'
+        diffs.append(f'mediated memory access trace first difference at event {index}: '
+                     f'original {original_event}; replacement {replacement_event}')
+    if orig.get('redzone_writes', []) != repl.get('redzone_writes', []):
+        diffs.append(f'buffer redzones: original {orig.get("redzone_writes", [])}; '
+                     f'replacement {repl.get("redzone_writes", [])}')
     return diffs
 
 

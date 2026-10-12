@@ -241,11 +241,21 @@ definitions but no executable bytes; keep them outside public repositories becau
 fixtures may contain private game state. The minimizer is bounded and writes both the untouched
 failing fixture and its minimized form.
 
-`explore` performs seeded, bounded value variation from explicit ABI types. It is not coverage
-guided and does not systematically construct pointer-alias or floating-point edge cases. The
-current harness compares return values, ABI-preserved state, explicitly selected
-caller-saved registers, scripted calls, and final writable-byte differences. It guards buffer
-boundaries at page granularity. It does **not** trace dynamic reads, provide byte-exact bounds for
-every access, trace instruction-level first divergence, or report control-flow coverage. Those
-remain blockers for broad automated batch decompilation. A match is evidence for the supplied
-fixtures only; it does not promote a function or establish observed original-game behavior.
+`explore` performs seeded, bounded variation for explicitly typed integers and float/double ABI
+arguments. It includes zero, signed/unsigned boundaries, finite floating-point edges, infinities,
+NaNs, and alias cases only for pointer arguments whose ABI record explicitly sets
+`alias_safe: true`. It is not coverage guided. Each result is still a candidate fixture and must
+be reviewed for contract validity before execution.
+
+The harness records its mediated scripted import/stub reads and writes in `access_trace`, including
+direction, byte count, region, and source. It also checks a deterministic byte redzone after each
+declared buffer, reporting the first changed offset; the existing guard page catches accesses past
+the allocation page. The redzone detects guest writes into padding, but cannot observe reads,
+same-value writes, or the exact instruction that accessed a byte. Direct guest memory instructions
+are not dynamically traced. The harness still compares return values, ABI-preserved state,
+explicitly selected caller-saved registers, scripted calls, and final changed writable bytes.
+
+Instruction-level first-divergence state traces and control-flow/CFG coverage remain unavailable.
+No coverage feedback is used to steer exploration. These are blockers for broad automated batch
+decompilation. A match is evidence for supplied fixtures only; it does not promote a function or
+establish observed original-game behavior.

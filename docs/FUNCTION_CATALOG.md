@@ -187,6 +187,8 @@ coverage, mismatch, blockers, and evidence-reference fields separately. It does 
 function status files or promote a function.
 
 Original execution, differential fixture success, edge verification, and full verification remain
-distinct states. The current engine has no dynamic memory-read trace, instruction-level divergence
-trace, or control-flow coverage. Those limitations must remain explicit in qualification and
-progress reports.
+distinct states. The engine records harness-mediated scripted memory accesses and checks a
+deterministic byte redzone after declared buffers for guest writes into allocation padding. It does
+not observe arbitrary guest loads/stores, same-value writes, or access instruction addresses;
+redzones cannot detect reads. Instruction-level first-divergence traces and CFG coverage remain
+unavailable and must stay explicit in qualification and progress reports.
