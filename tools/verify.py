@@ -88,6 +88,15 @@ def compare_case(orig: dict, repl: dict) -> list[str]:
             b = repl.get(group, {}).get(r)
             if a != b:
                 diffs.append(f'{group}.{r}: original {a} replacement {b}')
+    original_observed = set(orig.get('observed_registers', []))
+    replacement_observed = set(repl.get('observed_registers', []))
+    if original_observed != replacement_observed:
+        diffs.append('registers: compared-register declarations differ')
+    for reg in sorted(original_observed & replacement_observed):
+        a = orig.get('registers', {}).get(reg)
+        b = repl.get('registers', {}).get(reg)
+        if a != b:
+            diffs.append(f'registers.{reg}: original {a} replacement {b}')
     mo, mr = byte_map(orig.get('writes', [])), byte_map(repl.get('writes', []))
     bad = sorted(a for a in set(mo) | set(mr) if mo.get(a) != mr.get(a))
     for a in bad[:MAX_REPORTED]:
@@ -149,14 +158,15 @@ def lookup(name: str) -> tuple[str, str]:
     return address, hooks[0]['replacement']
 
 
-def run_side(boot: str, case: str, address: str, symbol: str | None, lib: str | None) -> dict:
+def run_side(boot: str, case: str, address: str, symbol: str | None, lib: str | None,
+             timeout: int = CASE_TIMEOUT) -> dict:
     cmd = [sys.executable, HARNESS, '--elf', boot, '--case', case, '--address', address]
     if symbol:
         cmd += ['--replacement', symbol, '--lib', lib]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=CASE_TIMEOUT)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return {'fault': f'timeout after {CASE_TIMEOUT} s'}
+        return {'fault': f'timeout after {timeout} s'}
     if r.returncode == 3:
         raise BadInput(f'{os.path.basename(case)}: {r.stderr.strip()}')
     if r.returncode != 0:
@@ -166,7 +176,8 @@ def run_side(boot: str, case: str, address: str, symbol: str | None, lib: str | 
 
 
 def run_cases(boot: str, captures: str, address: str, symbol: str, lib: str,
-              patch: str | None = None, env: dict | None = None, function: str | None = None) -> dict:
+              patch: str | None = None, env: dict | None = None, function: str | None = None,
+              timeout: int = CASE_TIMEOUT) -> dict:
     """Both sides of every case file in CAPTURES: {'original': [...], 'replacement': [...]}.
     One harness process per side maps the image once and forks per case."""
     cases = sorted(glob.glob(os.path.join(captures, '*.json')))
@@ -191,8 +202,7 @@ def run_cases(boot: str, captures: str, address: str, symbol: str, lib: str,
                 raise BadInput(f'{os.path.basename(path)} has invalid capture run_id')
     results: dict[str, list] = {}
     for side, sym in (('original', None), ('replacement', symbol)):
-        cmd = [sys.executable, HARNESS, '--elf', boot, '--cases', captures, '--address', address,
-               '--timeout', str(CASE_TIMEOUT)]
+        cmd = [sys.executable, HARNESS, '--elf', boot, '--cases', captures, '--address', address]
         side_env = None
         if sym:
             cmd += ['--replacement', sym, '--lib', lib]
@@ -203,7 +213,12 @@ def run_cases(boot: str, captures: str, address: str, symbol: str, lib: str,
             # functions) stay in place; its edits inside the replaced function never run.
             path, _, name = patch.partition(':')
             cmd += ['--patch', path, '--patch-name', name]
-        r = subprocess.run(cmd, capture_output=True, text=True, env=side_env)
+        cmd += ['--timeout', str(timeout)]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, env=side_env,
+                               timeout=timeout * len(cases) + 30)
+        except subprocess.TimeoutExpired as error:
+            raise BadInput(f'{side}: total harness timeout exceeded') from error
         if r.returncode != 0:
             raise BadInput(f'{side}: {r.stderr.strip()[-400:]}')
         by_file = json.loads(r.stdout)
@@ -213,7 +228,8 @@ def run_cases(boot: str, captures: str, address: str, symbol: str, lib: str,
 
 
 def run(name: str, captures: str, boot: str | None, lib: str | None, out: str | None,
-        patch: str | None = None, env: list | None = None, record: str | None = None, option: str = '') -> int:
+        patch: str | None = None, env: list | None = None, record: str | None = None,
+        option: str = '', timeout: int = CASE_TIMEOUT) -> int:
     boot = boot or os.environ.get('BB_ELF') or default_elf()
     lib = lib or os.environ.get('BB_GAME_LIB') or os.path.join(ROOT, 'build', 'game', 'libbbgame.so')
     if not boot or not os.path.isfile(boot):
@@ -222,7 +238,7 @@ def run(name: str, captures: str, boot: str | None, lib: str | None, out: str | 
         raise BadInput(f'no game library at {lib}: build the repository or pass --lib')
     address, symbol = lookup(name)
     extra = dict(e.split('=', 1) for e in (env or []))
-    results = run_cases(boot, captures, address, symbol, lib, patch, extra, name)
+    results = run_cases(boot, captures, address, symbol, lib, patch, extra, name, timeout)
     out = out or os.path.join(captures, 'results')
     os.makedirs(out, exist_ok=True)
     files = {}
@@ -287,6 +303,7 @@ def main() -> int:
     r.add_argument('--elf', dest='boot', help='the executable (eboot.elf); default $BB_ELF, then $BB_DATA_ROOT/elf/eboot.elf')
     r.add_argument('--lib')
     r.add_argument('--out')
+    r.add_argument('--timeout', type=int, default=CASE_TIMEOUT, help='per case timeout in seconds')
     r.add_argument('--patch', metavar='FILE:NAME',
                    help='run both sides on an image with this community patch applied (checks an option against it)')
     r.add_argument('--env', action='append', metavar='KEY=VALUE', help='environment for the replacement side')
@@ -309,7 +326,10 @@ def main() -> int:
         try:
             if a.record and (a.patch or a.env) and not a.option:
                 raise BadInput('--record with --patch or --env needs --option LABEL')
-            return run(a.function, a.captures, a.boot, a.lib, a.out, a.patch, a.env, a.record, a.option)
+            if a.timeout < 1 or a.timeout > 3600:
+                raise BadInput('--timeout must be between 1 and 3600 seconds')
+            return run(a.function, a.captures, a.boot, a.lib, a.out, a.patch, a.env, a.record,
+                       a.option, a.timeout)
         except (BadInput, OSError, json.JSONDecodeError) as e:
             print(f'verify: {e}', file=sys.stderr)
             return 3

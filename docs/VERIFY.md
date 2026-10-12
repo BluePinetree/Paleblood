@@ -202,3 +202,50 @@ reached:
 displaced instructions and jumps back; the function itself is unchanged. Counts are rewritten
 every 2 s. Entries whose bytes differ (hooked or patched) are skipped, and prologues that cannot
 move (RIP-relative, branches) are refused by `probe_list.py`.
+
+## Differential engine (Phase 2)
+
+`tools/differential.py` orchestrates the same Paleblood loader and guest-instruction harness, then
+compares original-instruction results with a registered Paleblood replacement. It uses the
+existing Phase 1 SQLite catalog (`--state` selects that database) for resumable case results and
+run state; it does not keep a second catalog or change function verification status.
+
+Before execution, provide `abi.json` in the fixture directory or an `abi` object in every fixture.
+The manifest states the supported `sysv_amd64` calling convention, evidence, 16-byte stack
+alignment, typed arguments and return, declared input and writable buffers, and a bounded timeout.
+Missing or uncertain ABI evidence blocks execution. Fixture memory values and pointer relationships
+must be fixed and serializable. The runner uses the fixture timeout by default; `--timeout` can
+only reduce that limit. The guest entry fixture is populated according to the declared PS4 x86-64
+System V register/stack convention. A replacement is called as a native Linux x86-64 function;
+only the explicitly shared convention is compared, and the engine does not emulate PS4 process or
+kernel behavior.
+
+Example using the existing edge fixture generator for `event_flag_write`:
+
+```sh
+STATE="${XDG_CACHE_HOME:-$HOME/.cache}/paleblood/function-catalog.sqlite3"
+python3 game/event/flag_write_cases.py "$BB_CAPTURES/event_flag_write/edge"
+tools/differential.py --state "$STATE" fixtures 0x017cfcc0 \
+    --cases "$BB_CAPTURES/event_flag_write/edge"
+tools/differential.py --state "$STATE" differential 0x017cfcc0 \
+    --cases "$BB_CAPTURES/event_flag_write/edge" \
+    --function event_flag_write --elf "$BB_ELF" --lib build/game/libbbgame.so --resume
+tools/differential.py --state "$STATE" evidence 0x017cfcc0 --out "$HOME/bb-backup/differential-evidence"
+```
+
+The differential command requires a current catalog qualification or an existing registered
+replacement. Its cache key includes executable, fixture, ABI, catalog/qualification, replacement
+source and binary, loader, harness, verifier, and engine identities. `--resume` reuses a side only
+when the complete key and fixture identity match. Evidence bundles contain hashes and fixture
+definitions but no executable bytes; keep them outside public repositories because real capture
+fixtures may contain private game state. The minimizer is bounded and writes both the untouched
+failing fixture and its minimized form.
+
+`explore` performs seeded, bounded value variation from explicit ABI types. It is not coverage
+guided and does not systematically construct pointer-alias or floating-point edge cases. The
+current harness compares return values, ABI-preserved state, explicitly selected
+caller-saved registers, scripted calls, and final writable-byte differences. It guards buffer
+boundaries at page granularity. It does **not** trace dynamic reads, provide byte-exact bounds for
+every access, trace instruction-level first divergence, or report control-flow coverage. Those
+remain blockers for broad automated batch decompilation. A match is evidence for the supplied
+fixtures only; it does not promote a function or establish observed original-game behavior.
