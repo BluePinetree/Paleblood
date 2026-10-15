@@ -50,6 +50,7 @@ typedef int (*f_unregister)(int);
 typedef int (*f_info)(int, void *);
 typedef int (*f_nat)(void *);
 typedef int (*finit)(void **, void **, const char *);
+typedef int (*f_equal)(void *, void *);
 typedef uint32_t (*f_u32_u32)(uint32_t);
 typedef uint16_t (*f_u16_u16)(uint16_t);
 typedef int (*f_inet_pton)(int, const char *, void *);
@@ -171,6 +172,32 @@ int main(void)
     static unsigned char block[0x40];
     rt_process.proc_param = block;
     CHECK(((void *(*)(void))fn("libkernel", "sceKernelGetProcParam"))() == block);
+
+    /* a thread variable equals itself and nothing else: the same object pointer is the same thread.
+       The runtime has a single guest thread so far (scePthreadCreate is not implemented), so the
+       unequal cases compare it with a pointer that is not a thread: they exercise pointer inequality
+       only, not two distinct valid thread handles. */
+    static unsigned char main_stack[0x100];
+    rt_thread_register_main(main_stack, sizeof main_stack);
+    void *const self = ((void *(*)(void))fn("libkernel", "scePthreadSelf"))();
+    const f_equal equal = (f_equal)fn("libkernel", "scePthreadEqual");
+    unsigned char not_a_thread;
+    CHECK(self && equal(self, self) != 0);
+    CHECK(equal(self, &not_a_thread) == 0 && equal(&not_a_thread, self) == 0);
+    CHECK(equal(self, NULL) == 0);
+
+    /* sched_yield gives up the processor and succeeds with 0, every time. That the host scheduler
+       actually ran another thread is not observable from here, so only the contract's result is
+       checked. */
+    const f_check yield = (f_check)fn("libkernel", "sched_yield");
+    CHECK(yield() == 0 && yield() == 0);
+    CHECK(is_implemented("libkernel", "sched_yield"));
+
+    /* scePthreadYield's PS4 signature (no result, or an int) is not established, so the entry stops
+       by name and is registered without counting as implemented. */
+    void (*pthread_yield_entry)(void) = (void (*)(void))fn("libkernel", "scePthreadYield");
+    CHECK(died_in_fatal(pthread_yield_entry));
+    CHECK(!is_implemented("libkernel", "scePthreadYield"));
 
     /* The PS4 host is little-endian AMD64; the network representation is big-endian. */
     CHECK(htonl(UINT32_C(0x12345678)) == UINT32_C(0x78563412));
