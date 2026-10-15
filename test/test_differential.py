@@ -101,6 +101,33 @@ class Differential(unittest.TestCase):
         self.assertEqual(mismatch(reduced), ["ret.rax: differs"])
         self.assertEqual(case["memory"][0]["bytes"], "01020304")
 
+    def test_instruction_trace_diagnostics_separate_path_changes_from_state_mismatches(self):
+        event = {"access": "read", "region": "buf:value", "region_offset": "+0x0", "width": 4,
+                 "before": "01020304", "after": None, "valid_region": True,
+                 "state_before": {"rax": "0x0"}}
+        original = {"schema": 1, "address": "0x400000", "cases": [{"id": "x", "ret": {"rax": "0x1"},
+                    "writes": [], "instruction_trace": {"complete": True, "events": [event]}}]}
+        replacement = {"schema": 1, "address": "0x400000", "cases": [{"id": "x", "ret": {"rax": "0x1"},
+                       "writes": [], "instruction_trace": {"complete": True, "events": [event, dict(event)]}}]}
+        result = verify.compare(original, replacement)
+        self.assertEqual(result["failed"], 0)
+        diagnostic = result["instruction_diagnostics"][0]["first_divergence"]
+        self.assertEqual(diagnostic["classification"], "bounded_memory_trace_difference")
+        self.assertFalse(diagnostic["observable_result_mismatch"])
+        replacement["cases"][0]["instruction_trace"]["complete"] = False
+        self.assertEqual(verify.compare(original, replacement)["failed"], 1)
+        replacement["cases"][0].pop("instruction_trace")
+        self.assertEqual(verify.compare(original, replacement)["failed"], 1)
+
+    def test_instruction_trace_bounds_violations_fail_closed(self):
+        event = {"access": "write", "region": "unmapped_or_undeclared", "region_offset": "0x900000000",
+                 "width": 1, "valid_region": False, "before": "00", "after": "00"}
+        result = {"schema": 1, "address": "0x400000", "cases": [{"id": "oob", "writes": [],
+                  "instruction_trace": {"complete": False, "events": [event], "stop_reason": "bounds"}}]}
+        compared = verify.compare(result, result)
+        self.assertEqual(compared["failed"], 1)
+        self.assertTrue(any("bounds violation" in diff for diff in compared["failures"][0]["diffs"]))
+
     def test_catalog_cache_tracks_executable_abi_source_and_fixture(self):
         base = differential.run_identity("0x400000", "exe", "fixture", ABI, None)
         for changed in (

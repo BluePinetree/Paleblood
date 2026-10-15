@@ -32,7 +32,7 @@ import verify  # noqa: E402
 import verification  # noqa: E402
 
 SCHEMA = 1
-ENGINE_VERSION = "1.1.0"
+ENGINE_VERSION = "1.2.0"
 ABI_REQUIRED_FIELDS = {"calling_convention", "confidence", "evidence", "stack_alignment",
                        "arguments", "returns", "input_regions", "writable_regions", "execution_limits"}
 
@@ -353,10 +353,12 @@ def update_verification_state(state: Path, address: str, cache_key: str, *,
 def run_identity(address: str, elf_sha: str, fixture_hash: str, abi: dict | None,
                  replacement: dict | None, qualification_record: dict | None = None,
                  catalog_identity: dict | None = None,
-                 build_config: dict | None = None) -> dict:
+                 build_config: dict | None = None,
+                 instruction_trace: dict | None = None) -> dict:
     return {"schema": SCHEMA, "engine_version": ENGINE_VERSION,
             "engine_sha256": digest_file(ROOT / "tools/differential.py"),
             "harness_sha256": digest_file(ROOT / "tools/harness.py"),
+            "instruction_trace_sha256": digest_file(ROOT / "tools/instruction_trace.py"),
             "verify_sha256": digest_file(ROOT / "tools/verify.py"),
             "loader_sha256": digest_file(ROOT / "runtime/loader.c"),
             "executable_sha256": elf_sha, "address": catalog.address(address),
@@ -364,7 +366,8 @@ def run_identity(address: str, elf_sha: str, fixture_hash: str, abi: dict | None
             "replacement": replacement,
             "qualification_sha256": digest_bytes(canonical(qualification_record).encode())
             if qualification_record else None,
-            "catalog_identity": catalog_identity, "build_configuration": build_config}
+            "catalog_identity": catalog_identity, "build_configuration": build_config,
+            "instruction_trace": instruction_trace}
 
 
 def build_configuration(library: Path) -> dict:
@@ -463,7 +466,8 @@ def save_case(state: Path, cache_key: str, side: str, fixture_id: str, result: d
 
 
 def run_differential(name: str, elf: Path, fixture_rows: list[tuple[Path, dict]], lib: Path,
-                     timeout: int, state: Path, cache_key: str, resume: bool) -> dict:
+                     timeout: int, state: Path, cache_key: str, resume: bool,
+                     trace_instructions: bool = False, trace_limit: int = 100_000) -> dict:
     address, symbol = verify.lookup(name)
     sides = {"original": [], "replacement": []}
     for path, _case in fixture_rows:
@@ -472,7 +476,8 @@ def run_differential(name: str, elf: Path, fixture_rows: list[tuple[Path, dict]]
             observed = cached_case(state, cache_key, side, fixture_id) if resume else None
             if observed is None:
                 observed = verify.run_side(str(elf), str(path), address, replacement_symbol,
-                                           str(lib) if replacement_symbol else None, timeout=timeout)
+                                           str(lib) if replacement_symbol else None, timeout=timeout,
+                                           trace_instructions=trace_instructions, trace_limit=trace_limit)
                 save_case(state, cache_key, side, fixture_id, observed)
             observed["id"] = fixture_id
             sides[side].append(observed)
@@ -773,6 +778,9 @@ def main() -> int:
             child.add_argument("--lib", type=Path, default=Path(os.environ.get("BB_GAME_LIB", "")))
         if command == "differential":
             child.add_argument("--resume", action="store_true", help="reuse completed sides from the same evidence key")
+            child.add_argument("--trace-instructions", action="store_true",
+                               help="trace bounded native guest/replacement memory events (Linux + Capstone 5)")
+            child.add_argument("--trace-instruction-limit", type=int, default=100_000)
         if command == "minimize":
             child.add_argument("--fixture", required=True)
             child.add_argument("--max-attempts", type=int, default=64)
@@ -873,6 +881,8 @@ def main() -> int:
                        "run_id": run_id, "fixtures": len(fixtures), "result": result,
                        "note": "original instructions only; no replacement comparison"}
         elif args.command == "differential":
+            if args.trace_instruction_limit < 1 or args.trace_instruction_limit > 10_000_000:
+                raise DifferentialError("--trace-instruction-limit must be between 1 and 10000000")
             elf_sha = executable_identity(args.elf)
             if not args.lib.is_file():
                 raise DifferentialError(f"replacement library unavailable: {args.lib}; build the project or pass --lib")
@@ -894,10 +904,13 @@ def main() -> int:
                 raise DifferentialError("candidate is not qualified for replacement development")
             identity = run_identity(args.address, elf_sha, fixture_hash, abi, replacement,
                                     candidate.get("qualification"), candidate.get("catalog_identity"),
-                                    build_config)
+                                    build_config,
+                                    {"enabled": args.trace_instructions,
+                                     "instruction_limit": args.trace_instruction_limit})
             cache_key = digest_bytes(canonical(identity).encode())
             result = run_differential(args.function, args.elf, fixtures, args.lib, timeout,
-                                      args.state, cache_key, args.resume)
+                                      args.state, cache_key, args.resume,
+                                      args.trace_instructions, args.trace_instruction_limit)
             qualification_record = candidate.get("qualification") or {}
             result["qualification"] = {key: qualification_record.get(key) for key in
                                         ("address", "classification", "eligible_for_fixture_generation",
@@ -914,8 +927,10 @@ def main() -> int:
                                       original_status="failed" if failed_original else "passed",
                                       differential_status="failed" if comparison["failed"] else "passed",
                                       mismatch_status="mismatch" if comparison["failed"] else "none",
-                                      blockers=["guest memory reads and instruction-level writes not traced",
-                                                "first-divergence and CFG coverage unavailable"],
+                                      blockers=([] if args.trace_instructions else
+                                                ["instruction-level memory accesses were not enabled"])
+                                      + ["unsupported implicit/AVX memory classes make traces incomplete",
+                                         "no instruction-aligned register divergence or CFG coverage"],
                                       evidence_ref=run_id)
             payload = {"run_id": run_id, **result}
         elif args.command == "minimize":

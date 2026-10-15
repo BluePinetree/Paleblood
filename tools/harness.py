@@ -610,42 +610,84 @@ def run_case(machine: Machine, case: dict, address: str, target: int | None) -> 
     return run.run(target if target is not None else run.guest(int(address, 0)))
 
 
-def batch(machine: Machine, cases_dir: str, address: str, target: int | None, timeout: int) -> dict:
+def _run_isolated(machine: Machine, case: dict, address: str, target: int | None,
+                  timeout: int, trace: bool, trace_limit: int, replacement_lib: str | None) -> dict:
+    import signal
+    r, w = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(r)
+        signal.alarm(timeout)
+        try:
+            if trace:
+                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                import instruction_trace
+                instruction_trace.trace_me()
+            result = run_case(machine, case, address, target)
+            code = 0
+        except BadInput as error:
+            result, code = {'bad_input': str(error)}, 3
+        except Exception as error:
+            result, code = {'bad_input': f'instruction tracing failed: {error}'}, 3
+        with os.fdopen(w, 'w') as stream:
+            json.dump(result, stream, sort_keys=True)
+        os._exit(code)
+    os.close(w)
+    trace_result = None
+    if trace:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import instruction_trace
+        target_address = target if target is not None else IMAGE + int(address, 0) - EBOOT_BASE
+        try:
+            trace_result = instruction_trace.trace_child(pid, target_address, machine.boot, case,
+                                                        replacement_lib, trace_limit)
+        except (OSError, ValueError, instruction_trace.TraceUnavailable) as error:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                os.waitpid(pid, 0)
+            except ChildProcessError:
+                pass
+            os.close(r)
+            raise BadInput(f'instruction tracing unavailable: {error}') from error
+    with os.fdopen(r) as stream:
+        data = stream.read()
+    if trace_result is not None and '_tracee_wait_status' in trace_result:
+        status = trace_result.pop('_tracee_wait_status')
+    else:
+        _, status = os.waitpid(pid, 0)
+    if os.WIFSIGNALED(status):
+        sig = os.WTERMSIG(status)
+        result = {'fault': f'timeout after {timeout} s' if sig == signal.SIGALRM else f'signal {sig}'}
+    elif os.WEXITSTATUS(status) == 3:
+        raise BadInput(json.loads(data)['bad_input'])
+    elif os.WEXITSTATUS(status) != 0 or not data:
+        result = {'fault': f'exit {os.WEXITSTATUS(status)}'}
+    else:
+        result = json.loads(data)
+    if trace_result is not None:
+        result['instruction_trace'] = trace_result
+    return result
+
+
+def batch(machine: Machine, cases_dir: str, address: str, target: int | None, timeout: int,
+          trace: bool = False, trace_limit: int = 100_000,
+          replacement_lib: str | None = None) -> dict:
     """Every *.json in CASES_DIR, each in a fork of the mapped machine: a crash or a hang loses
     only that case. Returns {file stem: result}."""
     import glob
-    import signal
     out = {}
     for path in sorted(glob.glob(os.path.join(cases_dir, '*.json'))):
         stem = os.path.splitext(os.path.basename(path))[0]
         with open(path) as f:
             case = json.load(f)
-        r, w = os.pipe()
-        pid = os.fork()
-        if pid == 0:
-            os.close(r)
-            signal.alarm(timeout)
-            try:
-                res = run_case(machine, case, address, target)
-                code = 0
-            except BadInput as e:
-                res, code = {'bad_input': str(e)}, 3
-            with os.fdopen(w, 'w') as f:
-                json.dump(res, f, sort_keys=True)
-            os._exit(code)
-        os.close(w)
-        with os.fdopen(r) as f:
-            data = f.read()
-        _, status = os.waitpid(pid, 0)
-        if os.WIFSIGNALED(status):
-            sig = os.WTERMSIG(status)
-            out[stem] = {'fault': f'timeout after {timeout} s' if sig == signal.SIGALRM else f'signal {sig}'}
-        elif os.WEXITSTATUS(status) == 3:
-            raise BadInput(f'{stem}: {json.loads(data)["bad_input"]}')
-        elif os.WEXITSTATUS(status) != 0 or not data:
-            out[stem] = {'fault': f'exit {os.WEXITSTATUS(status)}'}
-        else:
-            out[stem] = json.loads(data)
+        try:
+            out[stem] = _run_isolated(machine, case, address, target, timeout, trace,
+                                      trace_limit, replacement_lib)
+        except BadInput as error:
+            raise BadInput(f'{stem}: {error}') from error
         out[stem]['id'] = stem
     return out
 
@@ -660,6 +702,10 @@ def main() -> int:
     ap.add_argument('--replacement')
     ap.add_argument('--lib')
     ap.add_argument('--timeout', type=int, default=20, help='per case, batch mode')
+    ap.add_argument('--trace-instructions', action='store_true',
+                    help='trace bounded x86-64 guest/replacement memory operands (Linux + Capstone 5)')
+    ap.add_argument('--trace-instruction-limit', type=int, default=100_000,
+                    help='maximum single-stepped instructions per case')
     ap.add_argument('--patch', help='a community patch file (XML); with --patch-name, its bytes are written '
                     'into the image first (to check an option against the patch it replaces)')
     ap.add_argument('--patch-name')
@@ -686,11 +732,15 @@ def main() -> int:
             if not a.lib:
                 raise BadInput('--replacement needs --lib')
             target = load_replacement(a.lib, a.replacement, boot['size'])
+        if a.trace_instruction_limit < 1 or a.trace_instruction_limit > 10_000_000:
+            raise BadInput('--trace-instruction-limit must be 1..10000000')
         if a.case:
             with open(a.case) as f:
-                result = run_case(machine, json.load(f), a.address, target)
+                result = _run_isolated(machine, json.load(f), a.address, target, a.timeout,
+                                       a.trace_instructions, a.trace_instruction_limit, a.lib)
         else:
-            result = batch(machine, a.cases, a.address, target, a.timeout)
+            result = batch(machine, a.cases, a.address, target, a.timeout,
+                           a.trace_instructions, a.trace_instruction_limit, a.lib)
     except (OSError, ValueError, KeyError, BadInput, json.JSONDecodeError, AttributeError) as e:
         print(f'harness: {e}', file=sys.stderr)
         return 3
