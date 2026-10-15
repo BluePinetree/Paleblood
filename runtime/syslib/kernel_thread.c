@@ -128,6 +128,20 @@ static int sce_attr_set_detach_state(guest_attr **attr, int state)
     return sce(attr_set_detach_state(attr, state));
 }
 
+/* The detach state a thread created from the attribute variable starts in, for the call that
+   creates it. No variable, an empty one, and an attribute nobody set a state on all mean the
+   system's default (libthr's _pthread_create uses its default attribute when the variable is null
+   or empty). That default is not established for the PS4, so the process stops, naming the caller,
+   instead of assuming joinable: a fresh attribute's detach_state field is zero, and zero is the
+   joinable value, so reading the field directly would assume it silently. */
+int rt_thread_attr_detach_state(void *const *attr, const char *caller)
+{
+    const guest_attr *a = attr ? *attr : NULL;
+    if (!a || !a->has_detach_state)
+        rt_fatal(caller, "the PS4 default detach state is not established by public evidence");
+    return a->detach_state;
+}
+
 RT_SYSLIB("libkernel", scePthreadSelf, thread_self);
 RT_SYSLIB("libkernel", scePthreadEqual, thread_equal);
 RT_SYSLIB("libkernel", sched_yield, kernel_sched_yield);

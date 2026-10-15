@@ -134,12 +134,23 @@ establishes a different part:
 As with the mutex functions (`runtime/syslib/kernel_mutex.c`), the SCE name returns `0x80020000`
 plus the error number, and the POSIX name returns the number itself.
 
-Still open, and not reached by any call this group implements: the detach state a fresh attribute
-starts with, and the one `scePthreadAttrGet` copies from a running thread. Both are values the
-system supplies. POSIX makes joinable the default, but nothing we can cite confirms what the PS4
-reports. The runtime records only a state that was set, and `scePthreadAttrGet` drops a state set
-earlier, so a later reader of either default must stop by name instead of assuming joinable. Nothing
-reads the state yet, so dropping it is not covered by a test.
+Still open: the detach state a fresh attribute starts with, and the one `scePthreadAttrGet` copies
+from a running thread. Both are values the system supplies. POSIX makes joinable the default, but
+nothing we can cite confirms what the PS4 reports. Thread creation uses the same default when it is
+given no attribute variable or an empty one (libthr's `_pthread_create`, `thr_create.c`).
+
+How the runtime keeps that open:
+
+- The attribute records a state only when one is set (`has_detach_state`). `scePthreadAttrGet`
+  replaces the whole attribute, so a state set before the copy is dropped.
+- Thread creation is to read the state through `rt_thread_attr_detach_state`
+  (`runtime/include/runtime/process.h`), never from the field. A fresh attribute's field holds
+  zero, which is the joinable value, so reading the field directly would assume joinable silently.
+- For no variable, an empty variable, or a state nobody set, the reader stops the process
+  (`rt_fatal`) and names the call that asked.
+- `test/test_syslib.c` checks each of those cases in a forked child. It also checks that the last
+  state set is kept, that a rejected value leaves it unchanged, and that the SCE and POSIX names
+  record on the same object.
 
 ## Implementation rule
 
@@ -162,5 +173,5 @@ Implement the established contract and test the `RT_SYSLIB` entry through its li
 - [PSP2SDK `psp2/net/netctl.h` file reference](https://psp2sdk.github.io/netctl_8h.html) and [vitasdk `SceNetCtl` user group](https://docs.vitasdk.org/group__SceNetCtlUser.html) - the same declarations, with no prose describing any return value in this group
 - [vitasdk/vita-headers `psp2/error.h`](https://github.com/vitasdk/vita-headers/blob/master/include/psp2/error.h) - `0 on success` as the documented SCE-family return convention
 - [POSIX `pthread_attr_setdetachstate`](https://pubs.opengroup.org/onlinepubs/9799919799/functions/pthread_attr_getdetachstate.html) - the detach state semantics, the invalid-value error, and the recommended `EINVAL` for an uninitialised attribute
-- [FreeBSD `pthread_attr(3)`](https://man.freebsd.org/cgi/man.cgi?query=pthread_attr_setdetachstate&sektion=3), [libthr `thr_attr.c`](https://cgit.freebsd.org/src/tree/lib/libthr/thread/thr_attr.c) (`_pthread_attr_setdetachstate`, `_pthread_attr_get_np`) and [`include/pthread.h`](https://cgit.freebsd.org/src/tree/include/pthread.h) (`PTHREAD_CREATE_JOINABLE`, `PTHREAD_CREATE_DETACHED`)
+- [FreeBSD `pthread_attr(3)`](https://man.freebsd.org/cgi/man.cgi?query=pthread_attr_setdetachstate&sektion=3), [libthr `thr_attr.c`](https://cgit.freebsd.org/src/tree/lib/libthr/thread/thr_attr.c) (`_pthread_attr_setdetachstate`, `_pthread_attr_get_np`), [`thr_create.c`](https://cgit.freebsd.org/src/tree/lib/libthr/thread/thr_create.c) (`_pthread_create`: the default attribute for a null or empty variable) and [`include/pthread.h`](https://cgit.freebsd.org/src/tree/include/pthread.h) (`PTHREAD_CREATE_JOINABLE`, `PTHREAD_CREATE_DETACHED`)
 - [OpenOrbis `include/orbis/_types/pthread.h`](https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/blob/master/include/orbis/_types/pthread.h) - the PS4 homebrew SDK's `ORBIS_PTHREAD_CREATE_*` values, which follow FreeBSD's

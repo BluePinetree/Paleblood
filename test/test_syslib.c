@@ -51,6 +51,7 @@ typedef int (*f_info)(int, void *);
 typedef int (*f_nat)(void *);
 typedef int (*finit)(void **, void **, const char *);
 typedef int (*f_equal)(void *, void *);
+typedef int (*f_attr_get)(void *, void **);
 typedef uint32_t (*f_u32_u32)(uint32_t);
 typedef uint16_t (*f_u16_u16)(uint16_t);
 typedef int (*f_inet_pton)(int, const char *, void *);
@@ -120,6 +121,14 @@ static void info_of_module_one(void) { netctl_info(1, netctl_shared); }
    stack: the fatal must not write through it, and netctl_shared stays the untouched witness. */
 static void nat_info_with_size(void) { int nat[4] = {16, 0, 0, 0}; netctl_nat(nat); }
 
+/* Thread creation reads an attribute's detach state through rt_thread_attr_detach_state. A state
+   the guest did not set is the system's default, which is not established, so the read must stop
+   the process; each case is read in a child. detach_reader_attr is the variable the child reads. */
+static int detach_state_of(void **attr) { return rt_thread_attr_detach_state(attr, "test"); }
+static void *detach_reader_attr;
+static void read_detach_state(void) { (void)detach_state_of(&detach_reader_attr); }
+static void read_detach_state_without_variable(void) { (void)detach_state_of(NULL); }
+
 int main(void)
 {
     /* Unresolved entries are still callable diagnostics, but are not reported as implemented. */
@@ -188,25 +197,51 @@ int main(void)
 
     /* A thread attribute takes one of the two detach states, joinable (0) or detached (1). Any
        other value, or a variable holding no attribute object, is EINVAL: an SCE code under the SCE
-       name, the errno itself under the POSIX name. Nothing reads the state back yet (no getter is
-       imported and scePthreadCreate is not implemented), so only the results are checked. */
+       name, the errno itself under the POSIX name. The state is read back the way thread creation
+       will read it, through rt_thread_attr_detach_state. */
     const f1 thread_attr_init = (f1)fn("libkernel", "scePthreadAttrInit");
     const f1 thread_attr_destroy = (f1)fn("libkernel", "scePthreadAttrDestroy");
+    const f_attr_get thread_attr_get = (f_attr_get)fn("libkernel", "scePthreadAttrGet");
     const f2i set_detach = (f2i)fn("libkernel", "scePthreadAttrSetdetachstate");
     const f2i posix_set_detach = (f2i)fn("libScePosix", "pthread_attr_setdetachstate");
     if (failures) return 1;
     void *thread_attr = NULL;
     CHECK(thread_attr_init(&thread_attr) == 0 && thread_attr);
-    CHECK(set_detach(&thread_attr, 1) == 0 && set_detach(&thread_attr, 0) == 0);
+
+    /* A fresh attribute has no state of its own: reading it stops instead of answering joinable. */
+    detach_reader_attr = thread_attr;
+    CHECK(died_in_fatal(read_detach_state));
+
+    /* The last state set is the one kept, and a rejected value leaves it alone. */
+    CHECK(set_detach(&thread_attr, 1) == 0 && detach_state_of(&thread_attr) == 1);
+    CHECK(set_detach(&thread_attr, 0) == 0 && detach_state_of(&thread_attr) == 0);
+    CHECK(set_detach(&thread_attr, 1) == 0);
     CHECK(set_detach(&thread_attr, 2) == (int)0x80020016);
     CHECK(set_detach(&thread_attr, -1) == (int)0x80020016);
-    CHECK(posix_set_detach(&thread_attr, 1) == 0 && posix_set_detach(&thread_attr, 0) == 0);
+    CHECK(detach_state_of(&thread_attr) == 1);
+
+    /* The POSIX name records on the same attribute object. */
+    CHECK(posix_set_detach(&thread_attr, 0) == 0 && detach_state_of(&thread_attr) == 0);
     CHECK(posix_set_detach(&thread_attr, 2) == 22 && posix_set_detach(&thread_attr, -1) == 22);
+    CHECK(detach_state_of(&thread_attr) == 0);
     CHECK(set_detach(NULL, 0) == (int)0x80020016 && posix_set_detach(NULL, 0) == 22);
+
+    /* scePthreadAttrGet replaces the attribute with the running thread's, whose detach state the
+       system supplies: the state set before is gone, and a state set afterwards is kept again. */
+    CHECK(set_detach(&thread_attr, 1) == 0);
+    CHECK(thread_attr_get(self, &thread_attr) == 0);
+    detach_reader_attr = thread_attr;
+    CHECK(died_in_fatal(read_detach_state));
+    CHECK(set_detach(&thread_attr, 1) == 0 && detach_state_of(&thread_attr) == 1);
+
     CHECK(thread_attr_destroy(&thread_attr) == 0 && thread_attr == NULL);
-    /* destroyed: the variable holds no object any more */
+    /* Destroyed, the variable holds no object: setting is EINVAL, and creating a thread from it
+       would use the system's default, so reading stops, as it does with no variable at all. */
     CHECK(set_detach(&thread_attr, 0) == (int)0x80020016);
     CHECK(posix_set_detach(&thread_attr, 0) == 22);
+    detach_reader_attr = thread_attr;
+    CHECK(died_in_fatal(read_detach_state));
+    CHECK(died_in_fatal(read_detach_state_without_variable));
     CHECK(is_implemented("libkernel", "scePthreadAttrSetdetachstate"));
     CHECK(is_implemented("libScePosix", "pthread_attr_setdetachstate"));
 
