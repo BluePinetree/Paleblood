@@ -18,8 +18,10 @@
 enum { BSD_ENOMEM = 12, BSD_EINVAL = 22 };
 #define SCE_KERNEL_ERROR(e) ((int)(0x80020000u + (unsigned)(e)))
 
-/* PTHREAD_CREATE_JOINABLE and PTHREAD_CREATE_DETACHED in FreeBSD's <pthread.h>. The PS4 homebrew
-   SDK's headers (OpenOrbis, include/orbis/_types/pthread.h) give the SCE names the same two values. */
+/* PTHREAD_CREATE_JOINABLE and PTHREAD_CREATE_DETACHED in FreeBSD's <pthread.h>. The OpenOrbis
+   homebrew SDK header (include/orbis/_types/pthread.h) defines ORBIS_PTHREAD_CREATE_JOINABLE and
+   ORBIS_PTHREAD_CREATE_DETACHED with the same values; it follows FreeBSD's text, so it corroborates
+   them rather than measuring them. */
 enum { DETACH_JOINABLE = 0, DETACH_DETACHED = 1 };
 
 typedef struct {
@@ -99,29 +101,32 @@ static int attr_destroy(guest_attr **attr)
 }
 
 /* Copies a running thread's attributes into an initialised attribute object. The copy replaces
-   what the object held, so a detach state set on it before is dropped: the thread's own detach
-   state is one the system supplies, and the runtime does not know it. */
+   everything the object held (libthr's pthread_attr_get_np copies the whole attribute block), so a
+   detach state set on it before is dropped: the thread's own detach state is one the system
+   supplies, and the runtime does not know it. */
 static int attr_get(guest_thread *thread, guest_attr **attr)
 {
     if (!thread || !attr || !*attr) return SCE_KERNEL_ERROR(BSD_EINVAL);
-    (*attr)->has_stack = 1;
-    (*attr)->stack = thread->stack;
-    (*attr)->stack_size = thread->stack_size;
-    (*attr)->has_detach_state = 0;
+    **attr = (guest_attr){.has_stack = 1, .stack = thread->stack, .stack_size = thread->stack_size};
     return 0;
 }
 
-/* Whether a thread created with the attribute starts detached or joinable. Any other value, or an
-   attribute variable that holds no object, is EINVAL (FreeBSD pthread_attr_setdetachstate(3)). */
+/* Whether a thread created with the attribute starts detached or joinable (POSIX
+   pthread_attr_setdetachstate). Any other value is EINVAL (POSIX; FreeBSD pthread_attr(3)), and so
+   is a variable holding no attribute object (libthr's _pthread_attr_setdetachstate, thr_attr.c). */
 static int attr_set_detach_state(guest_attr **attr, int state)
 {
-    if (!attr || !*attr || (state != DETACH_JOINABLE && state != DETACH_DETACHED)) return BSD_EINVAL;
+    if (!attr || !*attr) return BSD_EINVAL;
+    if (state != DETACH_JOINABLE && state != DETACH_DETACHED) return BSD_EINVAL;
     (*attr)->has_detach_state = 1;
     (*attr)->detach_state = state;
     return 0;
 }
 
-static int sce_attr_set_detach_state(guest_attr **attr, int state) { return sce(attr_set_detach_state(attr, state)); }
+static int sce_attr_set_detach_state(guest_attr **attr, int state)
+{
+    return sce(attr_set_detach_state(attr, state));
+}
 
 RT_SYSLIB("libkernel", scePthreadSelf, thread_self);
 RT_SYSLIB("libkernel", scePthreadEqual, thread_equal);
@@ -131,4 +136,7 @@ RT_SYSLIB("libkernel", scePthreadAttrInit, attr_init);
 RT_SYSLIB("libkernel", scePthreadAttrDestroy, attr_destroy);
 RT_SYSLIB("libkernel", scePthreadAttrGet, attr_get);
 RT_SYSLIB("libkernel", scePthreadAttrSetdetachstate, sce_attr_set_detach_state);
+
+/* libScePosix: errno values. pthread_attr_init and pthread_attr_destroy are not registered yet, so
+   eboot's own POSIX path stops at those first. */
 RT_SYSLIB("libScePosix", pthread_attr_setdetachstate, attr_set_detach_state);

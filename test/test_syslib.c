@@ -201,10 +201,11 @@ int main(void)
     CHECK(set_detach(&thread_attr, 2) == (int)0x80020016);
     CHECK(set_detach(&thread_attr, -1) == (int)0x80020016);
     CHECK(posix_set_detach(&thread_attr, 1) == 0 && posix_set_detach(&thread_attr, 0) == 0);
-    CHECK(posix_set_detach(&thread_attr, 2) == 22);
+    CHECK(posix_set_detach(&thread_attr, 2) == 22 && posix_set_detach(&thread_attr, -1) == 22);
     CHECK(set_detach(NULL, 0) == (int)0x80020016 && posix_set_detach(NULL, 0) == 22);
     CHECK(thread_attr_destroy(&thread_attr) == 0 && thread_attr == NULL);
-    CHECK(set_detach(&thread_attr, 0) == (int)0x80020016);       /* destroyed: no object left */
+    /* destroyed: the variable holds no object any more */
+    CHECK(set_detach(&thread_attr, 0) == (int)0x80020016);
     CHECK(posix_set_detach(&thread_attr, 0) == 22);
     CHECK(is_implemented("libkernel", "scePthreadAttrSetdetachstate"));
     CHECK(is_implemented("libScePosix", "pthread_attr_setdetachstate"));
