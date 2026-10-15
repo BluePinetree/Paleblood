@@ -25,7 +25,9 @@ void rt_thread_register_main(void *stack, uint64_t stack_size);
 
 /* The detach state (0 joinable, 1 detached) recorded on a guest thread attribute variable, for the
    system call that creates a thread from it; caller names that call. A state the guest did not set
-   is the system's default, which is not known, so asking for it stops the process (rt_fatal). */
+   is one the system supplies (a fresh attribute's default, or the state scePthreadAttrGet copied
+   from a running thread), and it is not known, so asking for it stops the process (rt_fatal). So
+   does a null or empty variable, for which thread creation would use the system's defaults. */
 int rt_thread_attr_detach_state(void *const *attr, const char *caller);
 
 /* Stops the process with a message naming the system function: behaviour the runtime does not

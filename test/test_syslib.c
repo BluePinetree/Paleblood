@@ -121,9 +121,10 @@ static void info_of_module_one(void) { netctl_info(1, netctl_shared); }
    stack: the fatal must not write through it, and netctl_shared stays the untouched witness. */
 static void nat_info_with_size(void) { int nat[4] = {16, 0, 0, 0}; netctl_nat(nat); }
 
-/* Thread creation reads an attribute's detach state through rt_thread_attr_detach_state. A state
-   the guest did not set is the system's default, which is not established, so the read must stop
-   the process; each case is read in a child. detach_reader_attr is the variable the child reads. */
+/* Thread creation will read an attribute's detach state through rt_thread_attr_detach_state. A
+   state the guest did not set is one the system supplies, which is not established, so the read
+   must stop the process; each such case is read in a child. detach_reader_attr is the variable the
+   child reads. */
 static int detach_state_of(void **attr) { return rt_thread_attr_detach_state(attr, "test"); }
 static void *detach_reader_attr;
 static void read_detach_state(void) { (void)detach_state_of(&detach_reader_attr); }
@@ -208,7 +209,10 @@ int main(void)
     void *thread_attr = NULL;
     CHECK(thread_attr_init(&thread_attr) == 0 && thread_attr);
 
-    /* A fresh attribute has no state of its own: reading it stops instead of answering joinable. */
+    /* A fresh attribute has no state of its own, and a rejected value does not give it one:
+       reading it stops instead of answering joinable. */
+    CHECK(set_detach(&thread_attr, 2) == (int)0x80020016);
+    CHECK(posix_set_detach(&thread_attr, -1) == 22);
     detach_reader_attr = thread_attr;
     CHECK(died_in_fatal(read_detach_state));
 
@@ -232,11 +236,12 @@ int main(void)
     CHECK(thread_attr_get(self, &thread_attr) == 0);
     detach_reader_attr = thread_attr;
     CHECK(died_in_fatal(read_detach_state));
-    CHECK(set_detach(&thread_attr, 1) == 0 && detach_state_of(&thread_attr) == 1);
+    CHECK(set_detach(&thread_attr, 0) == 0 && detach_state_of(&thread_attr) == 0);
 
     CHECK(thread_attr_destroy(&thread_attr) == 0 && thread_attr == NULL);
-    /* Destroyed, the variable holds no object: setting is EINVAL, and creating a thread from it
-       would use the system's default, so reading stops, as it does with no variable at all. */
+    /* Destroyed, the variable holds no object: setting is EINVAL. In FreeBSD libthr, creating a
+       thread from an empty variable, or from none, uses the default attributes, so reading stops
+       for both. */
     CHECK(set_detach(&thread_attr, 0) == (int)0x80020016);
     CHECK(posix_set_detach(&thread_attr, 0) == 22);
     detach_reader_attr = thread_attr;

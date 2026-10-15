@@ -121,7 +121,8 @@ establishes a different part:
 
 - **What the call does:** POSIX `pthread_attr_setdetachstate`. A thread created with the attribute
   starts detached for `PTHREAD_CREATE_DETACHED` and joinable for `PTHREAD_CREATE_JOINABLE`.
-- **Invalid detach state:** POSIX and FreeBSD's `pthread_attr(3)` both make any other value `EINVAL`.
+- **Invalid detach state:** POSIX and FreeBSD's `pthread_attr(3)` both make any other value
+  `EINVAL`.
 - **Invalid attribute variable:** POSIX leaves a null or uninitialised attribute undefined and only
   recommends `EINVAL`, and the FreeBSD manual lists no error for it. The behaviour comes from
   FreeBSD libthr's `_pthread_attr_setdetachstate` (`lib/libthr/thread/thr_attr.c`), which returns
@@ -136,21 +137,26 @@ plus the error number, and the POSIX name returns the number itself.
 
 Still open: the detach state a fresh attribute starts with, and the one `scePthreadAttrGet` copies
 from a running thread. Both are values the system supplies. POSIX makes joinable the default, but
-nothing we can cite confirms what the PS4 reports. Thread creation uses the same default when it is
-given no attribute variable or an empty one (libthr's `_pthread_create`, `thr_create.c`).
+nothing we can cite confirms what the PS4 reports. In FreeBSD libthr, `_pthread_create`
+(`thr_create.c`) uses that same default (`_pthread_attr_default`) when it is given no attribute
+variable or an empty one. The runtime treats both cases as the unknown default, so the outcome, a
+fatal, does not depend on the PS4 matching libthr there.
 
 How the runtime keeps that open:
 
 - The attribute records a state only when one is set (`has_detach_state`). `scePthreadAttrGet`
-  replaces the whole attribute, so a state set before the copy is dropped.
-- Thread creation is to read the state through `rt_thread_attr_detach_state`
-  (`runtime/include/runtime/process.h`), never from the field. A fresh attribute's field holds
+  replaces the whole attribute, as libthr's `pthread_attr_get_np` does, so a state set before the
+  copy is dropped.
+- By convention, thread creation reads the state through `rt_thread_attr_detach_state`
+  (`runtime/include/runtime/process.h`) and never from the field. A fresh attribute's field holds
   zero, which is the joinable value, so reading the field directly would assume joinable silently.
 - For no variable, an empty variable, or a state nobody set, the reader stops the process
-  (`rt_fatal`) and names the call that asked.
-- `test/test_syslib.c` checks each of those cases in a forked child. It also checks that the last
-  state set is kept, that a rejected value leaves it unchanged, and that the SCE and POSIX names
-  record on the same object.
+  (`rt_fatal`), names the call that asked, and says which of those cases it hit.
+
+What would settle it: an observed `scePthreadAttrGetdetachstate` result on a console, for a fresh
+attribute and for one filled by `scePthreadAttrGet` from the main thread. Guest call sites would
+also settle it: a thread created without a detach state being set, then joined or detached
+(`scePthreadJoin`, `pthread_join` and `scePthreadDetach` are imported).
 
 ## Implementation rule
 
