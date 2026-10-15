@@ -71,6 +71,15 @@ def boot_image():
     # Deliberately writes one byte beyond an eight-byte declared buffer. The payload remains
     # mapped, so the deterministic redzone check must report the exact overflow offset.
     code[0x940:0x945] = bytes.fromhex('c6470801c3')
+    # Explicit guest memory operands for the instruction tracer: load then a same-value store.
+    code[0x950:0x955] = bytes.fromhex('8b07 8906 c3')
+    # One-byte out-of-bounds read and same-value write into the mapped redzone.
+    code[0x960:0x969] = bytes.fromhex('0fb64704 884704 c3')
+    # Unaligned 32-bit read, followed by return.
+    code[0x970:0x976] = bytes.fromhex('8b4701 c3')
+    # Aliased and overlapping pointer test: read two bytes, then write two at rsi.
+    code[0x980:0x987] = bytes.fromhex('66 8b07 66 8906 c3')
+    code[0x990:0x993] = bytes.fromhex('8b07 c3')
     return ps4elf.build(
         segments=[(0, bytes(code), 0x1000, 5), (0x1000, DATA, 0x20, 6)],
         symbols=[(nid('testImport') + '#A#A', ps4elf.STT_FUNC, None)],
@@ -110,9 +119,125 @@ class Harness(unittest.TestCase):
                '--case', case_path, '--address', address]
         if lib:
             cmd += ['--replacement', 'replacement', '--lib', lib]
+        if getattr(self, 'trace_instructions', False):
+            cmd += ['--trace-instructions', '--trace-instruction-limit', '10000']
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)
         return json.loads(r.stdout)
+
+    def traced_case(self, case, address):
+        path = os.path.join(self.d, f'trace-{address}.json')
+        with open(path, 'w') as stream:
+            json.dump(case, stream)
+        self.trace_instructions = True
+        try:
+            return self.side_case(path, address=address)
+        finally:
+            self.trace_instructions = False
+
+    def test_instruction_trace_records_unaligned_read_and_same_value_write(self):
+        case = {'schema': 1, 'address': '0x00400950', 'id': 'read-write', 'returns': 'void',
+                'args': {'rdi': 'buf:source', 'rsi': 'buf:output'},
+                'buffers': {'source': {'size': 4, 'bytes': '78563412'},
+                            'output': {'size': 8, 'bytes': '7856341200000000'}},
+                'memory': [], 'imports': [], 'stubs': []}
+        result = self.traced_case(case, '0x00400950')
+        trace = result['instruction_trace']
+        self.assertTrue(trace['complete'], trace)
+        buffer_events = [event for event in trace['events'] if event['region'].startswith('buf:')]
+        self.assertEqual([(event['access'], event['width']) for event in buffer_events],
+                         [('read', 4), ('write', 4)])
+        self.assertEqual(buffer_events[0]['region'], 'buf:source')
+        self.assertEqual(buffer_events[1]['before'], buffer_events[1]['after'])
+        self.assertTrue(buffer_events[1]['valid_region'])
+        stack_event = next(event for event in trace['events'] if event['region'] == 'host_stack')
+        self.assertEqual((stack_event['access'], stack_event['width']), ('read', 8))
+
+    def test_instruction_trace_marks_one_byte_out_of_bounds_read_and_write(self):
+        case = {'schema': 1, 'address': '0x00400960', 'id': 'oob', 'returns': 'void',
+                'args': {'rdi': 'buf:source', 'rsi': 'buf:output'},
+                'buffers': {'source': {'size': 4, 'bytes': 'aabbccdd'},
+                            'output': {'size': 4, 'bytes': '00000000'}},
+                'memory': [], 'imports': [], 'stubs': []}
+        result = self.traced_case(case, '0x00400960')
+        events = [event for event in result['instruction_trace']['events'] if event['region'] != 'host_stack']
+        self.assertEqual([(event['access'], event['width'], event['valid_region'])
+                          for event in events], [('read', 1, False), ('write', 1, False)])
+        self.assertEqual(events[0]['region'], 'unmapped_or_undeclared')
+        self.assertEqual(events[1]['before'], events[1]['after'])
+
+    def test_instruction_trace_tracks_aliasing_and_unaligned_access(self):
+        case = {'schema': 1, 'address': '0x00400970', 'id': 'unaligned', 'returns': 'i32',
+                'args': {'rdi': 'buf:shared+0x1'},
+                'buffers': {'shared': {'size': 8, 'bytes': '00 78563412 000000'.replace(' ', '')}},
+                'memory': [], 'imports': [], 'stubs': []}
+        result = self.traced_case(case, '0x00400970')
+        event = next(event for event in result['instruction_trace']['events'] if event['region'] == 'buf:shared')
+        self.assertEqual((event['access'], event['width'], event['region_offset']), ('read', 4, '+0x2'))
+        alias = dict(case, address='0x00400980', id='alias', returns='void',
+                     args={'rdi': 'buf:shared', 'rsi': 'buf:shared'})
+        aliased = [event for event in self.traced_case(alias, '0x00400980')['instruction_trace']['events']
+                   if event['region'] == 'buf:shared']
+        self.assertEqual([(event['access'], event['width']) for event in aliased],
+                         [('read', 2), ('write', 2)])
+        self.assertEqual(aliased[0]['address'], aliased[1]['address'])
+        overlapping = dict(alias, id='overlap', args={'rdi': 'buf:shared', 'rsi': 'buf:shared+0x1'})
+        overlapped = [event for event in self.traced_case(overlapping, '0x00400980')['instruction_trace']['events']
+                      if event['region'] == 'buf:shared']
+        self.assertEqual([event['region_offset'] for event in overlapped], ['+0x0', '+0x1'])
+
+    def test_first_divergence_diagnostic_allows_equivalent_instruction_paths(self):
+        case = {'schema': 1, 'address': '0x00400990', 'id': 'different-path', 'returns': 'i32',
+                'args': {'rdi': 'buf:value'}, 'buffers': {'value': {'size': 4, 'bytes': '78563412'}},
+                'memory': [], 'imports': [], 'stubs': []}
+        path = os.path.join(self.d, 'different-path.json')
+        with open(path, 'w') as stream:
+            json.dump(case, stream)
+        replacement_source = os.path.join(self.d, 'different-path.c')
+        replacement_lib = os.path.join(self.d, 'different-path.so')
+        with open(replacement_source, 'w') as stream:
+            stream.write('#include <stdint.h>\n'
+                         'typedef struct { uint32_t version; unsigned char *image; uint64_t image_size;\n'
+                         'int (*install_hook)(uint64_t,uint64_t,const void *); } host_t;\n'
+                         'int bbgame_init(const host_t *host) { (void)host; return 0; }\n'
+                         'uint32_t replacement(volatile uint32_t *value) { uint32_t first=*value; '
+                         '(void)*value; return first; }\n')
+        subprocess.run([os.environ.get('CC', 'cc'), '-shared', '-fPIC', '-O2', '-o', replacement_lib,
+                        replacement_source], check=True)
+        self.trace_instructions = True
+        try:
+            original = self.side_case(path, address='0x00400990')
+            replacement = self.side_case(path, replacement_lib, '0x00400990')
+        finally:
+            self.trace_instructions = False
+        compared = verify.compare(
+            {'schema': 1, 'address': '0x00400990', 'cases': [original]},
+            {'schema': 1, 'address': '0x00400990', 'cases': [replacement]})
+        self.assertEqual(compared['failed'], 0)
+        divergence = compared['instruction_diagnostics'][0]['first_divergence']
+        self.assertEqual(divergence['classification'], 'bounded_memory_trace_difference')
+        self.assertFalse(divergence['observable_result_mismatch'])
+        self.assertIn('state_before', divergence['replacement'])
+
+        with open(replacement_source, 'w') as stream:
+            stream.write('#include <stdint.h>\n'
+                         'typedef struct { uint32_t version; unsigned char *image; uint64_t image_size;\n'
+                         'int (*install_hook)(uint64_t,uint64_t,const void *); } host_t;\n'
+                         'int bbgame_init(const host_t *host) { (void)host; return 0; }\n'
+                         'uint32_t replacement(volatile uint32_t *value) { return *value + 1; }\n')
+        subprocess.run([os.environ.get('CC', 'cc'), '-shared', '-fPIC', '-O2', '-o', replacement_lib,
+                        replacement_source], check=True)
+        self.trace_instructions = True
+        try:
+            mutated = self.side_case(path, replacement_lib, '0x00400990')
+        finally:
+            self.trace_instructions = False
+        rejected = verify.compare(
+            {'schema': 1, 'address': '0x00400990', 'cases': [original]},
+            {'schema': 1, 'address': '0x00400990', 'cases': [mutated]})
+        self.assertEqual(rejected['failed'], 1)
+        mismatch = rejected['instruction_diagnostics'][0]['first_divergence']
+        self.assertTrue(mismatch['observable_result_mismatch'])
 
     def build(self, broken=False, mutation=None):
         src = os.path.join(self.d, 'r.c')

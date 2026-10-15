@@ -128,6 +128,59 @@ differ. Write order is not compared.
 - The function runs alone: whatever it calls inside the game runs too, as original code,
   unless the case stubs it.
 
+## Optional instruction-level memory trace
+
+On Linux x86-64 with Capstone 5 installed, a case can also single-step instructions in the
+declared guest executable and replacement shared-object ranges. The CI pins Capstone 5.0.9. The
+tracer prefers the matching shared library bundled with the optional Python wheel, then falls back
+to the installed system library:
+
+```sh
+python3 tools/harness.py --elf "$BB_ELF" --case "$CASE" --address 0xADDRESS \
+    --trace-instructions --trace-instruction-limit 100000
+```
+
+`tools/verify.py run` and the catalog-backed `tools/differential.py differential` command accept
+the same `--trace-instructions` and `--trace-instruction-limit` options. Traces record the
+instruction identity/address, decoded memory operand, read/write class, byte width, effective
+address, declared region and offset, pre-access bytes, post-write bytes, and a bounded GPR snapshot.
+The bounds check uses the exact declared buffer length rather than its mapped redzone size, so
+unaligned, overlapping, aliased, and same-value writes are reported. Accesses to adjacent but
+undeclared bytes remain out of bounds even when the process mapping permits them.
+
+The trace is deliberately fail-closed. An undeclared/out-of-bounds access, missing byte snapshot,
+unsupported memory operand, instruction/event limit, or skipped host-call body marks the trace
+incomplete; differential comparison reports it as a failure. A host call is listed as a gap
+because its native instructions are outside the ranges being traced. Existing scripted import and
+stub records remain a separate mediated-access channel and are not presented as instruction-level
+events.
+
+The first-divergence report compares memory events in execution order and reports the earliest
+different recorded event with both sides' instruction addresses and register snapshots. Original
+and replacement PCs are not aligned: different instruction counts and addresses are allowed. An
+event-trace difference with equal final observable results is labeled a bounded internal-path
+difference, not a behavioral failure. If final return values, writes, calls, or observed registers
+differ but no earlier memory-event difference exists, the report says that no earlier memory
+divergence was observed. This is not instruction-by-instruction register comparison and does not
+claim an exact machine-state first divergence.
+
+This increment observes Capstone-classified explicit x86-64 memory operands and the common
+implicit stack effects of `call`, `ret`, `push`, `pop`, and `leave`. It does not yet trace arbitrary
+host-library instructions, every implicit/string/system memory operation, AVX/VEX memory
+semantics, asynchronous accesses, or CFG coverage. Unsupported classes mark the trace incomplete;
+therefore a complete trace means complete only for the supported scope. Single-stepping is slow
+and is intended for bounded verification fixtures, not boot runs. The tracer requires Linux
+`ptrace` permission and the Capstone 5 detail ABI. It records no executable bytes or game captures.
+
+The deterministic synthetic regression tests run with the repository test suite:
+
+```sh
+BB_LOADER=build/runtime/libpbloader.so python3 -m unittest test.test_harness test.test_differential
+```
+
+These tests validate instrumentation behavior only. They are not original-game fixtures and do not
+increase any function's verification status.
+
 ## From edge-verified to verified
 
 A function whose edge cases pass is `edge-verified` (CONTRIBUTING.md, "Status"). Once cases
