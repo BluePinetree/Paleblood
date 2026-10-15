@@ -33,7 +33,12 @@ jobs:
         env:
           CC: ${{ matrix.cc }}
           BB_LOADER: build/runtime/libpbloader.so
-        run: python3 -m unittest test.test_harness test.test_differential
+        run: python3 -m unittest discover -s test -p 'test_harness.py'
+      - name: Differential engine tests
+        env:
+          CC: ${{ matrix.cc }}
+          BB_LOADER: build/runtime/libpbloader.so
+        run: python3 -m unittest discover -s test -p 'test_differential.py'
 
   policy:
     runs-on: ubuntu-24.04
