@@ -113,6 +113,25 @@ fatal that names the question and the evidence that would close it.
 no public source, so no path in `runtime/syslib/netctl.c` returns one: a case that would need an error
 value stops the boot by name instead.
 
+## Thread attribute detach state (`scePthreadAttrSetdetachstate`, issue #34)
+
+`eboot` and `libSceFios2.elf` import `scePthreadAttrSetdetachstate` from `libkernel`, and `eboot`
+imports `pthread_attr_setdetachstate` from `libScePosix` (`symbols/imports.csv`). The
+[FreeBSD manual](https://man.freebsd.org/cgi/man.cgi?query=pthread_attr_setdetachstate&sektion=3)
+gives the contract: the call records whether a thread created with the attribute starts joinable or
+detached, accepts only `PTHREAD_CREATE_JOINABLE` and `PTHREAD_CREATE_DETACHED`, and fails with
+`EINVAL` for any other value or an invalid attribute. FreeBSD's `<pthread.h>` defines the two as `0`
+and `1`. The PS4 homebrew SDK's header (OpenOrbis, `include/orbis/_types/pthread.h`) gives the SCE
+names the same values; that header follows FreeBSD's text, so it corroborates the numbers rather
+than measuring them independently. As for the mutex functions, the SCE name returns `0x80020000`
+plus the error number and the POSIX name returns the number itself.
+
+Still open, and not reached by any call this group implements: the detach state a fresh attribute
+starts with, and the one `scePthreadAttrGet` copies from a running thread. Both are values the
+system supplies. The runtime records only a state that was set, and `scePthreadAttrGet` drops a
+state set earlier, so a later reader of either default must stop by name rather than assume
+FreeBSD's joinable default.
+
 ## Implementation rule
 
 Implement the established contract and test the `RT_SYSLIB` entry through its library and symbol name. Keep target-specific values separate from host values. When an argument, ID, return value, or error case is unknown, fail loudly with the call name and leave the question open; never choose a value to make `tools/boot.py` advance.
@@ -133,3 +152,4 @@ Implement the established contract and test the `RT_SYSLIB` entry through its li
 - [vitasdk/vita-headers `psp2/net/netctl.h`](https://github.com/vitasdk/vita-headers/blob/master/include/psp2/net/netctl.h) - PS Vita, a different operating system: shape of the `SceNetCtl` declarations, never a PS4 value
 - [PSP2SDK `psp2/net/netctl.h` file reference](https://psp2sdk.github.io/netctl_8h.html) and [vitasdk `SceNetCtl` user group](https://docs.vitasdk.org/group__SceNetCtlUser.html) - the same declarations, with no prose describing any return value in this group
 - [vitasdk/vita-headers `psp2/error.h`](https://github.com/vitasdk/vita-headers/blob/master/include/psp2/error.h) - `0 on success` as the documented SCE-family return convention
+- [FreeBSD `pthread_attr_setdetachstate(3)`](https://man.freebsd.org/cgi/man.cgi?query=pthread_attr_setdetachstate&sektion=3) and [OpenOrbis `include/orbis/_types/pthread.h`](https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/blob/master/include/orbis/_types/pthread.h) - the detach state values, FreeBSD's and the PS4 homebrew SDK's

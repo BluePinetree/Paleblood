@@ -1,11 +1,13 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-/* System call group: kernel, threads and memory. Threads and thread attributes (libkernel).
+/* System call group: kernel, threads and memory. Threads and thread attributes (libkernel,
+   libScePosix).
 
    Facts used: a thread or attribute variable holds a pointer to an object the library allocates
    (FreeBSD libthr, which the PS4's thread library is); the SCE names return 0 or 0x80020000 plus a
-   FreeBSD error number. An attribute records only what has been set or copied into it; reading a
-   value the runtime does not know (one the system would supply) is not implemented, so the boot
-   stops there by name instead of guessing. */
+   FreeBSD error number, and their POSIX names (libScePosix) return that error number itself. An
+   attribute records only what has been set or copied into it; reading a value the runtime does not
+   know (one the system would supply) is not implemented, so the boot stops there by name instead of
+   guessing. */
 #include "runtime/process.h"
 #include "runtime/syslib.h"
 
@@ -16,6 +18,10 @@
 enum { BSD_ENOMEM = 12, BSD_EINVAL = 22 };
 #define SCE_KERNEL_ERROR(e) ((int)(0x80020000u + (unsigned)(e)))
 
+/* PTHREAD_CREATE_JOINABLE and PTHREAD_CREATE_DETACHED in FreeBSD's <pthread.h>. The PS4 homebrew
+   SDK's headers (OpenOrbis, include/orbis/_types/pthread.h) give the SCE names the same two values. */
+enum { DETACH_JOINABLE = 0, DETACH_DETACHED = 1 };
+
 typedef struct {
     void *stack;
     uint64_t stack_size;
@@ -25,7 +31,11 @@ typedef struct {
     int has_stack;
     void *stack;
     uint64_t stack_size;
+    int has_detach_state;
+    int detach_state;
 } guest_attr;
+
+static int sce(int bsd) { return bsd ? SCE_KERNEL_ERROR(bsd) : 0; }
 
 static guest_thread main_thread;
 static _Thread_local guest_thread *current;
@@ -88,15 +98,30 @@ static int attr_destroy(guest_attr **attr)
     return 0;
 }
 
-/* Copies a running thread's attributes into an initialised attribute object. */
+/* Copies a running thread's attributes into an initialised attribute object. The copy replaces
+   what the object held, so a detach state set on it before is dropped: the thread's own detach
+   state is one the system supplies, and the runtime does not know it. */
 static int attr_get(guest_thread *thread, guest_attr **attr)
 {
     if (!thread || !attr || !*attr) return SCE_KERNEL_ERROR(BSD_EINVAL);
     (*attr)->has_stack = 1;
     (*attr)->stack = thread->stack;
     (*attr)->stack_size = thread->stack_size;
+    (*attr)->has_detach_state = 0;
     return 0;
 }
+
+/* Whether a thread created with the attribute starts detached or joinable. Any other value, or an
+   attribute variable that holds no object, is EINVAL (FreeBSD pthread_attr_setdetachstate(3)). */
+static int attr_set_detach_state(guest_attr **attr, int state)
+{
+    if (!attr || !*attr || (state != DETACH_JOINABLE && state != DETACH_DETACHED)) return BSD_EINVAL;
+    (*attr)->has_detach_state = 1;
+    (*attr)->detach_state = state;
+    return 0;
+}
+
+static int sce_attr_set_detach_state(guest_attr **attr, int state) { return sce(attr_set_detach_state(attr, state)); }
 
 RT_SYSLIB("libkernel", scePthreadSelf, thread_self);
 RT_SYSLIB("libkernel", scePthreadEqual, thread_equal);
@@ -105,3 +130,5 @@ RT_SYSLIB_UNRESOLVED("libkernel", scePthreadYield, thread_yield);
 RT_SYSLIB("libkernel", scePthreadAttrInit, attr_init);
 RT_SYSLIB("libkernel", scePthreadAttrDestroy, attr_destroy);
 RT_SYSLIB("libkernel", scePthreadAttrGet, attr_get);
+RT_SYSLIB("libkernel", scePthreadAttrSetdetachstate, sce_attr_set_detach_state);
+RT_SYSLIB("libScePosix", pthread_attr_setdetachstate, attr_set_detach_state);

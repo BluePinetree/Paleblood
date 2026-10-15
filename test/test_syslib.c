@@ -186,6 +186,29 @@ int main(void)
     CHECK(equal(self, &not_a_thread) == 0 && equal(&not_a_thread, self) == 0);
     CHECK(equal(self, NULL) == 0);
 
+    /* A thread attribute takes one of the two detach states, joinable (0) or detached (1). Any
+       other value, or a variable holding no attribute object, is EINVAL: an SCE code under the SCE
+       name, the errno itself under the POSIX name. Nothing reads the state back yet (no getter is
+       imported and scePthreadCreate is not implemented), so only the results are checked. */
+    const f1 thread_attr_init = (f1)fn("libkernel", "scePthreadAttrInit");
+    const f1 thread_attr_destroy = (f1)fn("libkernel", "scePthreadAttrDestroy");
+    const f2i set_detach = (f2i)fn("libkernel", "scePthreadAttrSetdetachstate");
+    const f2i posix_set_detach = (f2i)fn("libScePosix", "pthread_attr_setdetachstate");
+    if (failures) return 1;
+    void *thread_attr = NULL;
+    CHECK(thread_attr_init(&thread_attr) == 0 && thread_attr);
+    CHECK(set_detach(&thread_attr, 1) == 0 && set_detach(&thread_attr, 0) == 0);
+    CHECK(set_detach(&thread_attr, 2) == (int)0x80020016);
+    CHECK(set_detach(&thread_attr, -1) == (int)0x80020016);
+    CHECK(posix_set_detach(&thread_attr, 1) == 0 && posix_set_detach(&thread_attr, 0) == 0);
+    CHECK(posix_set_detach(&thread_attr, 2) == 22);
+    CHECK(set_detach(NULL, 0) == (int)0x80020016 && posix_set_detach(NULL, 0) == 22);
+    CHECK(thread_attr_destroy(&thread_attr) == 0 && thread_attr == NULL);
+    CHECK(set_detach(&thread_attr, 0) == (int)0x80020016);       /* destroyed: no object left */
+    CHECK(posix_set_detach(&thread_attr, 0) == 22);
+    CHECK(is_implemented("libkernel", "scePthreadAttrSetdetachstate"));
+    CHECK(is_implemented("libScePosix", "pthread_attr_setdetachstate"));
+
     /* sched_yield gives up the processor and succeeds with 0, every time. That the host scheduler
        actually ran another thread is not observable from here, so only the contract's result is
        checked. */
