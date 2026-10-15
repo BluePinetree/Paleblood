@@ -44,8 +44,9 @@ void replacement(uint64_t *out)
     uint64_t local;
     (*(import_fn *)(img + 0x1000))(7, &local);
     local += **(uint64_t **)(img + 0x1010);
-    *out = local BROKEN;
-    *(uint32_t *)(img + 0x1018) = (uint32_t)local;
+    BRANCH
+    OUT_WRITE
+    GLOBAL_WRITE
 }
 '''
 
@@ -63,6 +64,13 @@ def boot_image():
     code = bytearray(0x1000)
     code[:len(CODE)] = CODE
     code[0x800:0x800 + len(STACK_CODE)] = STACK_CODE
+    code[0x900:0x906] = bytes.fromhex('b807000000c3')
+    code[0x910:0x912] = bytes.fromhex('ebfe')
+    code[0x920:0x928] = bytes.fromhex('48c7c707000000c3')
+    code[0x930:0x936] = bytes.fromhex('ba09000000c3')
+    # Deliberately writes one byte beyond an eight-byte declared buffer. The payload remains
+    # mapped, so the deterministic redzone check must report the exact overflow offset.
+    code[0x940:0x945] = bytes.fromhex('c6470801c3')
     return ps4elf.build(
         segments=[(0, bytes(code), 0x1000, 5), (0x1000, DATA, 0x20, 6)],
         symbols=[(nid('testImport') + '#A#A', ps4elf.STT_FUNC, None)],
@@ -79,7 +87,8 @@ CASE = {
 }
 
 
-@unittest.skipUnless(sys.platform == 'linux' and shutil.which('cc'), 'needs Linux x86-64 and a C compiler')
+@unittest.skipUnless(sys.platform == 'linux' and shutil.which(os.environ.get('CC', 'cc')),
+                     'needs Linux x86-64 and a C compiler')
 class Harness(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp()
@@ -94,20 +103,28 @@ class Harness(unittest.TestCase):
         shutil.rmtree(self.d)
 
     def side(self, lib=None):
+        return self.side_case(self.case, lib, '0x00400000')
+
+    def side_case(self, case_path, lib=None, address='0x00400000'):
         cmd = [sys.executable, os.path.join(TOOLS, 'harness.py'), '--elf', self.boot,
-               '--case', self.case, '--address', '0x00400000']
+               '--case', case_path, '--address', address]
         if lib:
             cmd += ['--replacement', 'replacement', '--lib', lib]
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)
         return json.loads(r.stdout)
 
-    def build(self, broken):
+    def build(self, broken=False, mutation=None):
         src = os.path.join(self.d, 'r.c')
         with open(src, 'w') as f:
-            f.write(REPLACEMENT_C.replace('BROKEN', '+ 1' if broken else ''))
-        lib = os.path.join(self.d, f'r{int(broken)}.so')
-        subprocess.run(['cc', '-shared', '-fPIC', '-O2', '-o', lib, src], check=True)
+            source = REPLACEMENT_C.replace('BRANCH', 'local = local == 0x1334 ? 1 : local;' if mutation == 'branch' else '')
+            source = source.replace('OUT_WRITE', '' if mutation == 'missing-write' else '*out = local ' + ('+ 1' if broken else '') + ';')
+            source = source.replace('GLOBAL_WRITE',
+                                    '*(uint16_t *)(img + 0x1018) = (uint16_t)local;' if mutation == 'narrow-write'
+                                    else '*(uint32_t *)(img + 0x1018) = (uint32_t)local;')
+            f.write(source)
+        lib = os.path.join(self.d, f'r{int(broken)}-{mutation or "plain"}.so')
+        subprocess.run([os.environ.get('CC', 'cc'), '-shared', '-fPIC', '-O2', '-o', lib, src], check=True)
         return lib
 
     def test_original_runs(self):
@@ -116,6 +133,20 @@ class Harness(unittest.TestCase):
         self.assertIn({'addr': 'buf:out+0x0', 'bytes': '3413'}, r['writes'])
         self.assertIn({'addr': '0x00401018', 'bytes': '3413'}, r['writes'])
         self.assertTrue(all(v == 'kept' for v in r['preserved'].values()))
+        self.assertTrue(any(event['access'] == 'write' and event['source'] == 'import_write'
+                            for event in r['access_trace']))
+        self.assertIn('not instrumented', r['access_trace_scope'])
+
+    def test_byte_precise_redzone_reports_guest_buffer_overrun(self):
+        case = {'schema': 1, 'address': '0x00400940', 'id': 'redzone', 'returns': 'void',
+                'args': {'rdi': 'buf:out'}, 'buffers': {'out': {'size': 8}},
+                'memory': [], 'imports': [], 'stubs': []}
+        path = os.path.join(self.d, 'redzone.json')
+        with open(path, 'w') as stream:
+            json.dump(case, stream)
+        result = self.side_case(path, address='0x00400940')
+        self.assertEqual(result['redzone_writes'], [{'buffer': 'out', 'first_offset': 8, 'changed_bytes': 1}])
+        self.assertTrue(any('redzone modified' in error for error in result['errors']))
 
     def compare(self, broken):
         res = lambda r: {'schema': 1, 'address': '0x00400000', 'cases': [r]}
@@ -128,6 +159,74 @@ class Harness(unittest.TestCase):
         out = self.compare(True)
         self.assertEqual(out['failed'], 1)
         self.assertIn('buf:out+0x0', out['failures'][0]['diffs'][0])
+
+    def test_mutation_matrix_rejects_branch_and_memory_write_errors(self):
+        out = self.compare(False)
+        self.assertEqual(out['failed'], 0)
+        for mutation in ('branch', 'missing-write', 'narrow-write'):
+            with self.subTest(mutation=mutation):
+                case_path = self.case
+                if mutation == 'narrow-write':
+                    case = dict(CASE, memory=[{'addr': '0x00401018', 'bytes': 'aabbccdd'}])
+                    case_path = os.path.join(self.d, 'narrow.json')
+                    with open(case_path, 'w') as stream:
+                        json.dump(case, stream)
+                original = self.side_case(case_path)
+                replacement = self.side_case(case_path, self.build(mutation=mutation))
+                summary = verify.compare(
+                    {'schema': 1, 'address': '0x00400000', 'cases': [original]},
+                    {'schema': 1, 'address': '0x00400000', 'cases': [replacement]},
+                )
+                self.assertEqual(summary['failed'], 1)
+
+    def test_wrong_return_mutation_is_detected_on_original_instructions(self):
+        case = {'schema': 1, 'address': '0x00400900', 'id': 'return', 'returns': 'i32',
+                'args': {}, 'buffers': {}, 'memory': [], 'imports': [], 'stubs': []}
+        case_path = os.path.join(self.d, 'return.json')
+        with open(case_path, 'w') as stream:
+            json.dump(case, stream)
+        source = os.path.join(self.d, 'return.c')
+        library = os.path.join(self.d, 'return.so')
+        with open(source, 'w') as stream:
+            stream.write('#include <stdint.h>\n'
+                         'typedef struct { uint32_t version; unsigned char *image; uint64_t image_size;\n'
+                         'int (*install_hook)(uint64_t,uint64_t,const void *); } host_t;\n'
+                         'int bbgame_init(const host_t *h) { (void)h; return 0; }\n'
+                         'int replacement(void) { return 8; }\n')
+        subprocess.run([os.environ.get('CC', 'cc'), '-shared', '-fPIC', '-O2', '-o', library, source], check=True)
+        original = verify.run_side(self.boot, case_path, '0x00400900', None, None)
+        replacement = verify.run_side(self.boot, case_path, '0x00400900', 'replacement', library)
+        summary = verify.compare(
+            {'schema': 1, 'address': case['address'], 'cases': [original]},
+            {'schema': 1, 'address': case['address'], 'cases': [replacement]},
+        )
+        self.assertEqual(summary['failed'], 1)
+        self.assertTrue(any('ret.rax' in item for item in summary['failures'][0]['diffs']))
+
+    def test_opted_in_caller_saved_register_is_compared(self):
+        case = {'schema': 1, 'address': '0x00400920', 'id': 'caller-saved', 'returns': 'void',
+                'observe_registers': ['rdi'], 'args': {}, 'buffers': {}, 'memory': [],
+                'imports': [], 'stubs': []}
+        case_path = os.path.join(self.d, 'register.json')
+        with open(case_path, 'w') as stream:
+            json.dump(case, stream)
+        original = self.side_case(case_path, address='0x00400920')
+        self.assertEqual(original['registers']['rdi'], '0x7')
+        self.assertEqual(original['observed_registers'], ['rdi'])
+        case.update(address='0x00400930', observe_registers=['rdx'])
+        with open(case_path, 'w') as stream:
+            json.dump(case, stream)
+        original = self.side_case(case_path, address='0x00400930')
+        self.assertEqual(original['registers']['rdx'], '0x9')
+
+    def test_original_instruction_timeout_is_bounded(self):
+        case = {'schema': 1, 'address': '0x00400910', 'id': 'infinite-loop', 'returns': 'void',
+                'args': {}, 'buffers': {}, 'memory': [], 'imports': [], 'stubs': []}
+        case_path = os.path.join(self.d, 'timeout.json')
+        with open(case_path, 'w') as stream:
+            json.dump(case, stream)
+        result = verify.run_side(self.boot, case_path, case['address'], None, None, timeout=1)
+        self.assertEqual(result['fault'], 'timeout after 1 s')
 
     def test_run_counts_cases_with_repeated_ids(self):
         caps = os.path.join(self.d, 'caps')
