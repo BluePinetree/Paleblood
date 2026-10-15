@@ -172,6 +172,16 @@ therefore a complete trace means complete only for the supported scope. Single-s
 and is intended for bounded verification fixtures, not boot runs. The tracer requires Linux
 `ptrace` permission and the Capstone 5 detail ABI. It records no executable bytes or game captures.
 
+Per Intel's [POP instruction semantics](https://www.intel.com/content/dam/www/public/us/en/documents/manuals/64-ia-32-architectures-software-developer-vol-2a-manual.pdf),
+for `POP` to a memory destination based on `RSP`/`ESP`, the implicit stack read is traced at the
+pre-instruction stack pointer, then the destination effective address is calculated with the
+stack pointer advanced by the popped operand width. This covers direct, displacement, and SIB
+indexed forms such as `[rsp]`, `[rsp+disp]`, and `[rsp+index*scale+disp]`. The destination is
+bounds-checked at that post-increment address. Unknown POP destination access classifications or
+unsupported operand/address sizes make the trace incomplete. `PUSH [rsp]` remains different: its
+explicit source address uses pre-decrement RSP, and its implicit write is at RSP minus the pushed
+width.
+
 The deterministic synthetic regression tests run with the repository test suite:
 
 ```sh

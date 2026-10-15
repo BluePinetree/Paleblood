@@ -259,7 +259,7 @@ def _register(regs: Registers, name: str) -> int | None:
 
 
 def _effective_address(op: dict, regs: Registers, insn_pc: int, insn_size: int,
-                       address_size: int = 8) -> tuple[int | None, list[str]]:
+                       address_size: int = 8, rsp_increment: int = 0) -> tuple[int | None, list[str]]:
     gaps = []
     address = op["disp"]
     for field, factor in (("base", 1), ("index", op["scale"])):
@@ -272,6 +272,10 @@ def _effective_address(op: dict, regs: Registers, insn_pc: int, insn_size: int,
             return None, gaps
         if name in ("rip", "eip"):
             value = insn_pc + insn_size
+        elif name in ("rsp", "esp"):
+            # POP r/m computes an RSP-relative destination EA after popping its source.
+            # Other instructions use the pre-instruction value supplied in `regs`.
+            value += rsp_increment
         address += value * factor
     address &= (1 << (address_size * 8)) - 1
     segment = op["segment"]
@@ -450,13 +454,29 @@ def trace_child(pid: int, target: int, boot: dict, case: dict,
             mark_gap(pc, "VEX/EVEX memory semantics are outside this trace version")
         events = []
         mnemonic = insn["mnemonic"]
+        pop_has_memory_destination = False
         for index, operand in enumerate(insn["operands"]):
             access = operand["access"]
             if access not in (CS_AC_READ, CS_AC_WRITE, CS_AC_READ | CS_AC_WRITE):
                 mark_gap(pc, f"decoder did not classify memory operand {index}")
                 continue
+            pop_rsp_increment = 0
+            if mnemonic == "pop":
+                pop_has_memory_destination = True
+                if access != CS_AC_WRITE:
+                    mark_gap(pc, "POP memory destination access classification is unsupported")
+                    continue
+                base, index_register = operand["base"], operand["index"]
+                if operand["size"] not in (2, 8) or insn["address_size"] not in (4, 8):
+                    mark_gap(pc, "POP memory destination has unsupported operand or address size")
+                    continue
+                if index_register in ("rsp", "esp"):
+                    mark_gap(pc, "POP memory destination uses unsupported RSP index encoding")
+                    continue
+                if base in ("rsp", "esp"):
+                    pop_rsp_increment = operand["size"]
             address, address_gaps = _effective_address(operand, regs, pc, insn["size"],
-                                                       insn["address_size"])
+                                                       insn["address_size"], pop_rsp_increment)
             for gap in address_gaps:
                 mark_gap(pc, gap)
             if address is None:
@@ -481,8 +501,12 @@ def trace_child(pid: int, target: int, boot: dict, case: dict,
             mark_gap(pc, f"implicit memory behavior not instrumented for {mnemonic}")
         if implicit:
             address, width, read, write, _ = implicit
-            events.append(_event(address, width, read, write, regs, pc, identity, regions,
-                                 libc, pid, insn, None))
+            implicit_event = _event(address, width, read, write, regs, pc, identity, regions,
+                                    libc, pid, insn, None)
+            events.append(implicit_event)
+            if mnemonic == "pop" and pop_has_memory_destination:
+                # The source stack read precedes the destination write architecturally.
+                events.insert(0, events.pop())
         _ptrace(libc, PTRACE_SINGLESTEP, pid)
         _, status = os.waitpid(pid, 0)
         result["instructions"] += 1
