@@ -80,6 +80,15 @@ def boot_image():
     # Aliased and overlapping pointer test: read two bytes, then write two at rsi.
     code[0x980:0x987] = bytes.fromhex('66 8b07 66 8906 c3')
     code[0x990:0x993] = bytes.fromhex('8b07 c3')
+    # POP memory destinations use the incremented RSP. Save the real return stack, point RSP
+    # at a fixture buffer, pop into an RSP-relative destination, restore RSP, then return.
+    code[0x9a0:0x9a0 + 13] = bytes.fromhex('48 89e0 48 89fc 8f0424 4889c4 c3')
+    code[0x9b0:0x9b0 + 14] = bytes.fromhex('48 89e0 48 89fc 8f442408 4889c4 c3')
+    # SIB: [rsp + rcx*8 + 8], with rcx=1, so destination is entry RSP + 24.
+    code[0x9c0:0x9c0 + 19] = bytes.fromhex('48 89e0 48 89fc b901000000 8f44cc08 4889c4 c3')
+    # PUSH [rsp] reads from pre-decrement RSP and stores at RSP-8. Used to guard the
+    # neighboring stack-instruction semantics while POP's special case is corrected.
+    code[0x9e0:0x9e0 + 17] = bytes.fromhex('48 89e0 48 83c708 48 89fc ff3424 4889c4 c3')
     return ps4elf.build(
         segments=[(0, bytes(code), 0x1000, 5), (0x1000, DATA, 0x20, 6)],
         symbols=[(nid('testImport') + '#A#A', ps4elf.STT_FUNC, None)],
@@ -185,6 +194,69 @@ class Harness(unittest.TestCase):
         overlapped = [event for event in self.traced_case(overlapping, '0x00400980')['instruction_trace']['events']
                       if event['region'] == 'buf:shared']
         self.assertEqual([event['region_offset'] for event in overlapped], ['+0x0', '+0x1'])
+
+    def _rsp_fixture(self, address, size, args=None):
+        case = {'schema': 1, 'address': address, 'id': f'pop-rsp-{address}', 'returns': 'void',
+                'args': {'rdi': 'buf:stack', **(args or {})},
+                'buffers': {'stack': {'size': size, 'bytes': '8877665544332211' + '00' * (size - 8)}},
+                'memory': [], 'imports': [], 'stubs': []}
+        return self.traced_case(case, address)
+
+    def _stack_buffer_events(self, result):
+        return [event for event in result['instruction_trace']['events']
+                if event['region'] == 'buf:stack']
+
+    def test_pop_rsp_uses_post_increment_destination_and_pre_increment_stack_read(self):
+        result = self._rsp_fixture('0x004009a0', 16)
+        events = self._stack_buffer_events(result)
+        self.assertTrue(result['instruction_trace']['complete'], result['instruction_trace'])
+        self.assertEqual([(event['access'], event['region_offset'], event['width']) for event in events],
+                         [('read', '+0x0', 8), ('write', '+0x8', 8)])
+        self.assertEqual(events[1]['before'], '0000000000000000')
+        self.assertEqual(events[1]['after'], '8877665544332211')
+        self.assertTrue(all(event['valid_region'] for event in events))
+
+    def test_pop_rsp_displacement_uses_incremented_stack_pointer(self):
+        result = self._rsp_fixture('0x004009b0', 24)
+        events = self._stack_buffer_events(result)
+        self.assertTrue(result['instruction_trace']['complete'], result['instruction_trace'])
+        self.assertEqual([(event['access'], event['region_offset']) for event in events],
+                         [('read', '+0x0'), ('write', '+0x10')])
+        self.assertTrue(events[1]['valid_region'])
+
+    def test_pop_rsp_sib_index_and_displacement_use_incremented_base(self):
+        result = self._rsp_fixture('0x004009c0', 32)
+        events = self._stack_buffer_events(result)
+        self.assertTrue(result['instruction_trace']['complete'], result['instruction_trace'])
+        self.assertEqual([(event['access'], event['region_offset']) for event in events],
+                         [('read', '+0x0'), ('write', '+0x18')])
+        self.assertTrue(events[1]['valid_region'])
+
+    def test_pop_rsp_actual_out_of_bounds_destination_fails_closed(self):
+        result = self._rsp_fixture('0x004009a0', 8)
+        trace = result['instruction_trace']
+        events = [event for event in result['instruction_trace']['events']
+                  if event['region'] == 'buf:stack' or event.get('bounds_violation')]
+        self.assertFalse(trace['complete'], trace)
+        self.assertEqual([(event['access'], event['region'], event['valid_region'])
+                          for event in events], [('read', 'buf:stack', True),
+                                                ('write', 'unmapped_or_undeclared', False)])
+        # Before this fix both events were attributed to +0x0, making the destination look in-bounds.
+        self.assertEqual(int(events[1]['address'], 16), int(events[0]['address'], 16) + 8)
+        compared = verify.compare(
+            {'schema': 1, 'address': '0x004009a0', 'cases': [result]},
+            {'schema': 1, 'address': '0x004009a0', 'cases': [result]})
+        self.assertEqual(compared['failed'], 1)
+        self.assertTrue(any('instruction memory bounds violation' in diff
+                            for diff in compared['failures'][0]['diffs']))
+
+    def test_push_rsp_source_keeps_pre_decrement_address(self):
+        result = self._rsp_fixture('0x004009e0', 16)
+        events = self._stack_buffer_events(result)
+        self.assertTrue(result['instruction_trace']['complete'], result['instruction_trace'])
+        # The source uses pre-decrement RSP; the implicit destination is one word below it.
+        self.assertEqual([(event['access'], event['region_offset']) for event in events[:2]],
+                         [('read', '+0x8'), ('write', '+0x0')])
 
     def test_first_divergence_diagnostic_allows_equivalent_instruction_paths(self):
         case = {'schema': 1, 'address': '0x00400990', 'id': 'different-path', 'returns': 'i32',
