@@ -12,6 +12,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import os
+from pathlib import Path
 import signal
 import struct
 import sys
@@ -94,7 +95,15 @@ class Instruction(ctypes.Structure):
 
 class Capstone:
     def __init__(self):
-        path = ctypes.util.find_library("capstone")
+        path = None
+        try:
+            import capstone
+            bundled = Path(capstone.__file__).parent / "lib" / "libcapstone.so"
+            if bundled.is_file():
+                path = str(bundled)
+        except ImportError:
+            pass
+        path = path or ctypes.util.find_library("capstone")
         if not path:
             raise TraceUnavailable("libcapstone is unavailable; install the Capstone development package")
         self.lib = ctypes.CDLL(path)

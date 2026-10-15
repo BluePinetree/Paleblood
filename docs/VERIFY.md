@@ -131,7 +131,9 @@ differ. Write order is not compared.
 ## Optional instruction-level memory trace
 
 On Linux x86-64 with Capstone 5 installed, a case can also single-step instructions in the
-declared guest executable and replacement shared-object ranges:
+declared guest executable and replacement shared-object ranges. The CI pins Capstone 5.0.9. The
+tracer prefers the matching shared library bundled with the optional Python wheel, then falls back
+to the installed system library:
 
 ```sh
 python3 tools/harness.py --elf "$BB_ELF" --case "$CASE" --address 0xADDRESS \
