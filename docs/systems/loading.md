@@ -60,8 +60,8 @@ imported names and providers are in `symbols/imports.csv`.
   and `fclose`.
 - `libScePlayGo`: `scePlayGoInitialize`, `scePlayGoOpen`, `scePlayGoGetChunkId`,
   `scePlayGoGetLocus`, and `scePlayGoSetInstallSpeed`. The runtime stands in for the
-  `libScePlayGo` system module, so loading it succeeds (Paleblood #310); each of these
-  functions stops by name until it is implemented.
+  `libScePlayGo` system module, so loading it succeeds (Paleblood #310). It opens one handle and
+  lists no chunks, so the game never asks for a chunk's location; see `docs/runtime-syscalls.md`.
 
 </details>
 

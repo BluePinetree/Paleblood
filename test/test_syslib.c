@@ -483,6 +483,37 @@ static void ac_init_boot_param_not_declared(void)
     rt_process.app_boot_param_unread = 0;
     ac_init(init, boot);
 }
+
+/* PlayGo: one handle, no chunks. */
+typedef struct { void *buffer; uint32_t size, reserved; } pg_parameters;
+typedef int32_t (*f_pg_init)(const pg_parameters *);
+typedef int32_t (*f_pg_open)(int32_t *, const void *);
+typedef int32_t (*f_pg_chunks)(int32_t, uint16_t *, uint32_t, uint32_t *);
+typedef int32_t (*f_pg_speed)(int32_t, int32_t);
+static f_pg_init pg_init;
+static f_pg_open pg_open;
+static f_pg_chunks pg_chunks;
+static f_pg_speed pg_speed;
+static int32_t pg_handle;
+static uint16_t pg_ids[100];
+static uint32_t pg_count;
+static char pg_buffer[64];
+static void pg_init_none(void) { pg_init(NULL); }
+static void pg_init_no_buffer(void) { const pg_parameters p = {NULL, 64, 0}; pg_init(&p); }
+static void pg_init_no_size(void) { const pg_parameters p = {pg_buffer, 0, 0}; pg_init(&p); }
+static void pg_init_reserved(void) { const pg_parameters p = {pg_buffer, 64, 1}; pg_init(&p); }
+static void pg_init_again(void) { const pg_parameters p = {pg_buffer, 64, 0}; pg_init(&p); }
+static void pg_open_no_handle(void) { pg_open(NULL, NULL); }
+static void pg_open_parameter(void) { int32_t h; pg_open(&h, pg_buffer); }
+static void pg_open_again(void) { int32_t h; pg_open(&h, NULL); }
+static void pg_chunks_bad_handle(void) { pg_chunks(pg_handle + 1, pg_ids, 100, &pg_count); }
+static void pg_chunks_no_ids(void) { pg_chunks(pg_handle, NULL, 100, &pg_count); }
+static void pg_chunks_no_room(void) { pg_chunks(pg_handle, pg_ids, 0, &pg_count); }
+static void pg_chunks_no_count(void) { pg_chunks(pg_handle, pg_ids, 100, NULL); }
+static void pg_speed_bad_handle(void) { pg_speed(pg_handle + 1, 2); }
+static void pg_speed_three(void) { pg_speed(pg_handle, 3); }
+static void pg_speed_negative(void) { pg_speed(pg_handle, -1); }
+
 /* POSIX names of the condition variable calls: errno values, the same objects as the SCE names. */
 typedef int (*f_pc_init)(void **, void **);
 typedef int (*f_pc_one)(void **);
@@ -1716,6 +1747,50 @@ int main(void)
     }
     CHECK(is_implemented("libSceAppContent", "sceAppContentInitialize") &&
           is_implemented("libSceAppContent", "sceAppContentAppParamGetInt"));
+
+    /* libScePlayGo: the executable's shapes succeed, one handle and no chunks, the buffer untouched;
+       a call before its turn, another shape or a second initialize or open stops by name. */
+    pg_init = (f_pg_init)fn("libScePlayGo", "scePlayGoInitialize");
+    pg_open = (f_pg_open)fn("libScePlayGo", "scePlayGoOpen");
+    pg_chunks = (f_pg_chunks)fn("libScePlayGo", "scePlayGoGetChunkId");
+    pg_speed = (f_pg_speed)fn("libScePlayGo", "scePlayGoSetInstallSpeed");
+    if (pg_init && pg_open && pg_chunks && pg_speed) {
+        CHECK(died_in_fatal(pg_open_again));       /* before the initialize */
+        CHECK(died_in_fatal(pg_chunks_bad_handle)); /* before the open */
+        CHECK(died_in_fatal(pg_speed_bad_handle));
+        CHECK(died_in_fatal(pg_init_none));
+        CHECK(died_in_fatal(pg_init_no_buffer));
+        CHECK(died_in_fatal(pg_init_no_size));
+        CHECK(died_in_fatal(pg_init_reserved));
+        memset(pg_buffer, 0x5a, sizeof pg_buffer);
+        const pg_parameters p = {pg_buffer, sizeof pg_buffer, 0};
+        CHECK(pg_init(&p) == 0);
+        CHECK(died_in_fatal(pg_init_again));
+        CHECK(died_in_fatal(pg_open_no_handle));
+        CHECK(died_in_fatal(pg_open_parameter));
+        pg_handle = -1;
+        CHECK(pg_open(&pg_handle, NULL) == 0 && pg_handle != -1);
+        CHECK(died_in_fatal(pg_open_again));
+        for (size_t i = 0; i < 100; i++) pg_ids[i] = 0xbeef;
+        pg_count = 77;
+        CHECK(pg_chunks(pg_handle, pg_ids, 100, &pg_count) == 0 && pg_count == 0);
+        CHECK(pg_ids[0] == 0xbeef && pg_ids[99] == 0xbeef);
+        CHECK(died_in_fatal(pg_chunks_bad_handle));
+        CHECK(died_in_fatal(pg_chunks_no_ids));
+        CHECK(died_in_fatal(pg_chunks_no_room));
+        CHECK(died_in_fatal(pg_chunks_no_count));
+        CHECK(pg_speed(pg_handle, 0) == 0 && pg_speed(pg_handle, 1) == 0 && pg_speed(pg_handle, 2) == 0);
+        CHECK(died_in_fatal(pg_speed_bad_handle));
+        CHECK(died_in_fatal(pg_speed_three));
+        CHECK(died_in_fatal(pg_speed_negative));
+        int untouched = 1;
+        for (size_t i = 0; i < sizeof pg_buffer; i++) untouched &= pg_buffer[i] == 0x5a;
+        CHECK(untouched);
+    }
+    CHECK(is_implemented("libScePlayGo", "scePlayGoInitialize") && is_implemented("libScePlayGo", "scePlayGoOpen") &&
+          is_implemented("libScePlayGo", "scePlayGoGetChunkId") &&
+          is_implemented("libScePlayGo", "scePlayGoSetInstallSpeed"));
+    CHECK(!is_implemented("libScePlayGo", "scePlayGoGetLocus"));
     /* libScePosix pthread_cond_*: errno values. */
     pc_init = (f_pc_init)fn("libScePosix", "pthread_cond_init");
     const f_pc_one pc_destroy = (f_pc_one)fn("libScePosix", "pthread_cond_destroy");

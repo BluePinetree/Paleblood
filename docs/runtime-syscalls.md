@@ -1081,6 +1081,59 @@ supported. The public API is void. The independently examined native leaf also
 leaves the zero-extended pitch in RAX, which this implementation preserves for
 callers that observe it. A null output stops by the API name before any store.
 
+## PlayGo: chunk and install state (`libScePlayGo`, issue #35)
+
+`eboot` loads system module `0x0083` (`libScePlayGo` in the OpenOrbis id list) and imports
+`scePlayGoInitialize`, `scePlayGoOpen`, `scePlayGoGetChunkId`, `scePlayGoGetLocus` and
+`scePlayGoSetInstallSpeed`. The OpenOrbis toolchain's `lib/libScePlayGo.so` names them but has no
+header, so the shapes come from the executable's own calls.
+
+**What the engine does:**
+- **Initialize** (`0x023dd67a`; the same code at `0x023de849`): it allocates a 2 MiB buffer and
+  passes `{buffer, size in bytes, 0}`. The result is not checked. The buffer is freed when the
+  object is destroyed, with no terminate call (the executable imports none).
+- **Open** (`0x023deae4`): `scePlayGoOpen(&handle, NULL)`, with a 32-bit handle. Only success
+  sets a flag, and only that flag lets the speed call run.
+- **Chunk ids** (`0x023deb0f`): `scePlayGoGetChunkId(handle, ids, 100, &count)`. Room for 100
+  16-bit ids, and a 32-bit count. The count starts at 0, and the result is not checked.
+- **Locations** (`0x023deb30` and `0x023de8d6`, on a timer): asked for only when the count is not 0.
+  - Each location is one byte. The engine's install state starts at 2.
+  - A location of 2 sets it to 1, and 0 sets it to 0; any other value leaves 2.
+  - With no chunks, the state is set to 2 directly, the same as when every location is neither 0
+    nor 2.
+- **Speed** (`0x023dec3d`): `scePlayGoSetInstallSpeed(handle, speed)`. The caller narrows the
+  speed to 0, 1 or 2 and calls only when the open succeeded and the speed changed. It is a tail
+  call, so its result goes back to the engine's caller.
+
+**What the runtime does.** It serves the whole title from the user's copy (`/app0`) and tracks no
+chunks, so:
+- it initializes once;
+- it opens one handle;
+- it lists no chunks (count 0, the list unwritten);
+- it accepts speeds 0 to 2 and does nothing with them.
+
+The engine then keeps state 2 and never asks for a location, so `scePlayGoGetLocus` stays unbound.
+
+Failing the open would not let the game skip PlayGo. The open's result only gates the speed call,
+and the chunk id call runs either way, with the handle the engine zeroed. So failing it would need
+an error value nobody has established, and the chunk id call would still need an answer. Listing
+no chunks is the answer that invents least.
+The handle's value (1) is the runtime's choice; the engine only passes it back. The buffer is never
+read, written or kept.
+
+What a PS4 lists for this title, its location codes and the PlayGo error values are not public, so
+this is the runtime's answer, not an established PS4 result.
+
+**What stops by name:**
+- a call before the initialize or the open;
+- a second initialize or open;
+- missing parameters, buffer, size, handle variable, id room or count;
+- a nonzero third word, or an open parameter;
+- an unknown handle;
+- a speed outside 0 to 2.
+
+A local boot passes these calls and stops next at `sceUserServiceGetUserName` (`libSceUserService`).
+
 ## Implementation rule
 
 Implement the established contract and test the `RT_SYSLIB` entry through its library and symbol name. Keep target-specific values separate from host values. When an argument, ID, return value, or error case is unknown, fail loudly with the call name and leave the question open; never choose a value to make `tools/boot.py` advance.
